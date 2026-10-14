@@ -1,0 +1,22 @@
+# docker-compose.yml for TestGen local development (§9.9)
+services:
+  postgres:
+    image: postgres:16.6                 # same major as production
+    environment:
+      POSTGRES_DB: testgen
+      POSTGRES_USER: testgen
+      POSTGRES_PASSWORD: testgen
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U testgen"]
+      interval: 5s
+  flyway:
+    image: flyway/flyway:11.1.0
+    command: -url=jdbc:postgresql://postgres:5432/testgen -user=testgen -password=testgen migrate
+    volumes: ["./testgen-orchestrator/src/main/resources/db/migration:/flyway/sql"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+volumes:
+  pgdata:
