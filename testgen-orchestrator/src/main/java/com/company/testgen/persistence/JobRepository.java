@@ -4,6 +4,7 @@ import com.company.testgen.model.JobRecord;
 import com.company.testgen.model.RedactionReport;
 import org.jdbi.v3.core.Handle;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -122,6 +123,58 @@ public interface JobRepository {
      * Fenced state transition within the given handle (§7.4).
      */
     boolean updateStateFenced(Handle handle, UUID id, String state, long leaseEpoch, Instant expiresAt);
+
+    /**
+     * Extends lease_expires_at if the lease_epoch matches (§7.4).
+     *
+     * @return true if epoch matched and touch succeeded, false if lease was lost
+     */
+    boolean touch(UUID id, long leaseEpoch, Instant expiresAt);
+
+    /**
+     * Extends lease_expires_at within the given handle if the lease_epoch matches (§7.4).
+     */
+    boolean touch(Handle handle, UUID id, long leaseEpoch, Instant expiresAt);
+
+    /**
+     * Fenced completion: updates state to DONE and sets completion details (§7.4).
+     */
+    boolean completeFenced(UUID id, long leaseEpoch, String confidenceTier, Integer mrIid, String mrUrl);
+
+    /**
+     * Fenced completion within the given handle (§7.4).
+     */
+    boolean completeFenced(Handle handle, UUID id, long leaseEpoch, String confidenceTier, Integer mrIid, String mrUrl);
+
+    /**
+     * Fenced failure transition: updates state to FAILED with failure reason (§7.4).
+     */
+    boolean failFenced(UUID id, long leaseEpoch, String failureReason);
+
+    /**
+     * Fenced failure transition within the given handle (§7.4).
+     */
+    boolean failFenced(Handle handle, UUID id, long leaseEpoch, String failureReason);
+
+    /**
+     * Finds jobs whose lease expired more than the given duration ago and never reached a terminal state (§7.7).
+     */
+    List<JobRecord> findExpiredNonTerminal(Duration age);
+
+    /**
+     * Finds jobs whose lease expired more than the given duration ago within the given handle (§7.7).
+     */
+    List<JobRecord> findExpiredNonTerminal(Handle handle, Duration age);
+
+    /**
+     * Finds all job IDs marked DONE that lack a CONFIRMED MERGE_REQUEST effect (§7.7).
+     */
+    List<UUID> doneWithoutConfirmedMr();
+
+    /**
+     * Finds all job IDs marked DONE that lack a CONFIRMED MERGE_REQUEST effect within the given handle (§7.7).
+     */
+    List<UUID> doneWithoutConfirmedMr(Handle handle);
 
     /**
      * Marks a job failed with a failure reason.

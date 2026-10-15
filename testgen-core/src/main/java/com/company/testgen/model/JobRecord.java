@@ -77,4 +77,12 @@ public record JobRecord(
                 null
         );
     }
+
+    /**
+     * Returns the Jenkins build URL for this job or a synthesized fallback.
+     */
+    public String jenkinsBuildUrl() {
+        String base = System.getenv("BUILD_URL");
+        return base != null && !base.isBlank() ? base : "https://jenkins.example.com/job/testgen-pipeline/" + id;
+    }
 }

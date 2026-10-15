@@ -1,0 +1,13 @@
+# meta.yaml
+caseId: dashboard-date-filter-001
+targetArea: dashboard
+description: "Dashboard date filter persists across reload"
+sourcedFrom: "MR !1183, approved by @asha 2026-03-14"
+capturedAt: "2026-03-14T10:22:00Z"
+difficulty: medium
+tags:
+  - modal
+  - table
+  - aria-heavy
+knownLimitations: "row action menu has no test id; TEXT strategy expected"
+status: active

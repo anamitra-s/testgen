@@ -1,6 +1,9 @@
 package com.company.testgen.llm;
 
+import com.company.testgen.model.GeneratedFile;
+import com.company.testgen.model.GeneratedFileSet;
 import com.company.testgen.model.LocatorStrategy;
+import com.company.testgen.model.ParsedTestPlan;
 import com.company.testgen.model.Phase;
 import com.company.testgen.model.ResolvedLocator;
 import com.company.testgen.model.ResolvedLocatorSet;
@@ -261,5 +264,147 @@ class LangChain4jLlmClientTest {
 
         assertThat(result).isNotNull();
         assertThat(attempts.get()).isEqualTo(2);
+    }
+
+    @Test
+    @DisplayName("generateCode builds cache-first SystemMessage and uses SchemaRegistry.GENERATED_FILE_SET")
+    void testGenerateCodeMessageConstructionAndStructuredOutputs() {
+        AtomicReference<ChatRequest> capturedRequest = new AtomicReference<>();
+
+        GeneratedFileSet expectedFiles = new GeneratedFileSet(List.of(
+                new GeneratedFile("src/test/java/com/company/tests/billing/BillingTest.java", "public class BillingTest {}", true),
+                new GeneratedFile("src/main/java/com/company/pages/billing/BillingPage.java", "public class BillingPage {}", true)
+        ));
+        String responseJson = Json.stringify(expectedFiles);
+
+        AnthropicTokenUsage anthropicTokens = AnthropicTokenUsage.builder()
+                .inputTokenCount(2000)
+                .outputTokenCount(400)
+                .cacheCreationInputTokens(1800)
+                .cacheReadInputTokens(200)
+                .build();
+
+        ChatModel fakeModel = new ChatModel() {
+            @Override
+            public ChatResponse chat(ChatRequest chatRequest) {
+                capturedRequest.set(chatRequest);
+                return ChatResponse.builder()
+                        .aiMessage(AiMessage.from(responseJson))
+                        .metadata(AnthropicChatResponseMetadata.builder().tokenUsage(anthropicTokens).build())
+                        .build();
+            }
+        };
+
+        LangChain4jLlmClient client = new LangChain4jLlmClient(
+                "claude-sonnet-5",
+                fakeModel,
+                budgetGuard,
+                promptBundle,
+                new TransportRetryPolicy(0)
+        );
+
+        ParsedTestPlan plan = new ParsedTestPlan("billing", "Update billing card", List.of(), List.of(), false, false);
+        ResolvedLocatorSet locators = ResolvedLocatorSet.of(
+                new ResolvedLocator("e1", LocatorStrategy.TEST_ID, "save-btn", null, "page.getByTestId(\"save-btn\")")
+        );
+        String codeContextJson = "{\"pages\":[\"com.company.pages.billing.BillingPage\"]}";
+
+        GenerateRequest request = new GenerateRequest(
+                jobId,
+                10L,
+                0,
+                plan,
+                locators,
+                codeContextJson,
+                "commit-sha-123",
+                null
+        );
+
+        GeneratedFileSet result = client.generateCode(request);
+
+        assertThat(result).isNotNull();
+        assertThat(result.files()).hasSize(2);
+
+        // Verify request messages
+        ChatRequest chatReq = capturedRequest.get();
+        assertThat(chatReq).isNotNull();
+        assertThat(chatReq.messages()).hasSize(2);
+
+        // SystemMessage cache-first layout
+        ChatMessage sysMsg = chatReq.messages().getFirst();
+        assertThat(sysMsg).isInstanceOf(SystemMessage.class);
+        String sysText = ((SystemMessage) sysMsg).text();
+        assertThat(sysText).contains(promptBundle.generateSystem());
+        assertThat(sysText).contains(promptBundle.codingConventions());
+        assertThat(sysText).contains(codeContextJson);
+
+        // UserMessage instructions
+        ChatMessage userMsg = chatReq.messages().get(1);
+        assertThat(userMsg).isInstanceOf(UserMessage.class);
+        String userText = ((UserMessage) userMsg).singleText();
+        assertThat(userText).contains("Update billing card");
+        assertThat(userText).contains("save-btn");
+
+        // Structured Outputs
+        assertThat(chatReq.responseFormat().type()).isEqualTo(ResponseFormatType.JSON);
+        assertThat(chatReq.responseFormat().jsonSchema()).isEqualTo(SchemaRegistry.GENERATED_FILE_SET);
+
+        // Budget record check
+        List<CostEvent> events = repo.findByJobId(jobId);
+        assertThat(events).hasSize(1);
+        CostEvent event = events.getFirst();
+        assertThat(event.phase()).isEqualTo(Phase.GENERATE);
+        assertThat(event.tokenUsage().inputTokens()).isEqualTo(2000);
+        assertThat(event.tokenUsage().outputTokens()).isEqualTo(400);
+    }
+
+    @Test
+    @DisplayName("generateCode retry (attempt > 0) incorporates lint feedback in UserMessage")
+    void testGenerateCodeRetryWithFeedback() {
+        AtomicReference<ChatRequest> capturedRequest = new AtomicReference<>();
+
+        GeneratedFileSet expectedFiles = new GeneratedFileSet(List.of(
+                new GeneratedFile("src/test/java/com/company/tests/billing/BillingTest.java", "public class BillingTest {}", true)
+        ));
+
+        ChatModel fakeModel = new ChatModel() {
+            @Override
+            public ChatResponse chat(ChatRequest chatRequest) {
+                capturedRequest.set(chatRequest);
+                return ChatResponse.builder()
+                        .aiMessage(AiMessage.from(Json.stringify(expectedFiles)))
+                        .metadata(AnthropicChatResponseMetadata.builder().build())
+                        .build();
+            }
+        };
+
+        LangChain4jLlmClient client = new LangChain4jLlmClient(
+                "claude-sonnet-5",
+                fakeModel,
+                budgetGuard,
+                promptBundle,
+                new TransportRetryPolicy(0)
+        );
+
+        ParsedTestPlan plan = new ParsedTestPlan("billing", "Update billing card", List.of(), List.of(), false, false);
+        ResolvedLocatorSet locators = ResolvedLocatorSet.of(
+                new ResolvedLocator("e1", LocatorStrategy.TEST_ID, "save-btn", null, "page.getByTestId(\"save-btn\")")
+        );
+
+        GenerateRequest request = new GenerateRequest(
+                jobId,
+                11L,
+                1,
+                plan,
+                locators,
+                "{}",
+                "sha-1",
+                "Checkstyle [LineLength]: Line 42 in BillingTest.java exceeds 140 characters"
+        );
+
+        client.generateCode(request);
+
+        UserMessage userMsg = (UserMessage) capturedRequest.get().messages().get(1);
+        assertThat(userMsg.singleText()).contains("Line 42 in BillingTest.java exceeds 140 characters");
     }
 }

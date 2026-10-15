@@ -1,0 +1,12 @@
+suites:
+  smoke:
+    cases: 10
+    selection: stratified
+    repeats: 1
+  golden:
+    cases: all
+    selection: all
+    repeats: 3
+  hard:
+    filter: "difficulty == hard"
+    repeats: 5

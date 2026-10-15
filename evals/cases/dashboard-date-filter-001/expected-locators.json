@@ -1,0 +1,32 @@
+{
+  "date-filter-btn": {
+    "elementRefId": "date-filter-btn",
+    "strategy": "TEST_ID",
+    "value": "date-filter-button",
+    "role": null
+  },
+  "start-date-input": {
+    "elementRefId": "start-date-input",
+    "strategy": "LABEL",
+    "value": "Start Date",
+    "role": null
+  },
+  "end-date-input": {
+    "elementRefId": "end-date-input",
+    "strategy": "LABEL",
+    "value": "End Date",
+    "role": null
+  },
+  "apply-filter-btn": {
+    "elementRefId": "apply-filter-btn",
+    "strategy": "ROLE_NAME",
+    "value": "Apply Filter",
+    "role": "button"
+  },
+  "filter-badge": {
+    "elementRefId": "filter-badge",
+    "strategy": "TEST_ID",
+    "value": "active-date-badge",
+    "role": null
+  }
+}

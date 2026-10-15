@@ -1,0 +1,47 @@
+// Jenkinsfile.session-mint — Scheduled auth session minting into Vault (FR-37, §6.8, §9.4)
+pipeline {
+  agent { label 'testgen-worker' }
+  triggers { cron('H */2 * * *') }   // Mint sessions every 2 hours (max-age is 4h)
+  options {
+    timeout(time: 15, unit: 'MINUTES')
+    disableConcurrentBuilds()
+    buildDiscarder(logRotator(numToKeepStr: '30'))
+  }
+  parameters {
+    choice(name: 'TARGET_AREA', choices: ['all', 'dashboard', 'composer', 'statsimport'],
+           description: 'Target area to mint sessions for')
+  }
+  stages {
+    stage('Checkout') {
+      steps {
+        checkout scm
+      }
+    }
+    stage('Mint Sessions') {
+      steps {
+        withCredentials([
+          string(credentialsId: 'vault-token', variable: 'VAULT_TOKEN'),
+          usernamePassword(credentialsId: 'dashboard-svc-creds', usernameVariable: 'DASHBOARD_SVC_USER', passwordVariable: 'DASHBOARD_SVC_PASSWORD'),
+          usernamePassword(credentialsId: 'composer-svc-creds', usernameVariable: 'COMPOSER_SVC_USER', passwordVariable: 'COMPOSER_SVC_PASSWORD'),
+          usernamePassword(credentialsId: 'statsimport-svc-creds', usernameVariable: 'STATSIMPORT_SVC_USER', passwordVariable: 'STATSIMPORT_SVC_PASSWORD')
+        ]) {
+          sh """
+            export VAULT_ADDR="\${VAULT_ADDR:-https://vault.internal.net:8200}"
+            export VAULT_PATH="secret/testgen/sessions"
+            bash ops/session-mint/mint-sessions.sh "${params.TARGET_AREA}"
+          """
+        }
+      }
+    }
+  }
+  post {
+    always {
+      cleanWs()   // NFR-17: wipe local session tokens from worker workspace
+    }
+    failure {
+      slackSend channel: '#qa-automation',
+                color: 'danger',
+                message: "🔴 Session minting failed for ${params.TARGET_AREA}: ${env.BUILD_URL}"
+    }
+  }
+}

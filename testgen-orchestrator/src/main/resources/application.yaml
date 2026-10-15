@@ -1,0 +1,76 @@
+testgen:
+  ingestion:
+    max-age: 24h
+    required-contract-version: 2
+
+  llm:
+    provider: anthropic
+    model-id: "claude-sonnet-5"          # PIN A DATED SNAPSHOT — floating aliases are silent drift
+    candidate-model-id: ""               # canary target (§8.6); empty disables
+    canary-percent: 0
+    api-key: ${ANTHROPIC_API_KEY}
+    max-output-tokens: 8192
+    temperature: 0.0
+    timeout: 120s
+    transport-retries: 3
+    transport-backoff-base: 2s
+    cache-system-messages: true
+    cache-tools: false
+
+  budget:
+    max-tokens-per-job: 250000
+    max-usd-per-job: 2.50
+    price-book:                          # $ per Mtok; update when vendor pricing changes
+      claude-sonnet-5: { input: 3.00, output: 15.00, cache-write: 3.75, cache-read: 0.30 }
+
+  retry:
+    max-attempts: 3
+
+  dom:
+    max-snapshot-tokens: 25000
+    max-nodes: 2000
+
+  redaction:
+    rules-version: "redaction-v3"
+    fail-closed: true                    # DO NOT change; here to be auditable, not tunable
+
+  validation:
+    l2-enabled: true
+    l2-blocking: false                   # advisory during rollout (§6.8)
+    l2-timeout: 5m
+    allow-text-strategy: true            # emits advisory violation when used
+
+  gitlab:
+    url: https://gitlab.example.com
+    project-id: "1842"
+    token: ${GITLAB_TOKEN}
+    target-branch: main
+    branch-prefix: "testgen"
+
+  db:
+    url: ${TESTGEN_DB_URL}
+    user: ${TESTGEN_DB_USER}
+    password: ${TESTGEN_DB_PASSWORD}
+    pool-size: 4
+    migrate-on-start: true
+
+  idempotency:
+    lease-ttl: 30m
+    heartbeat-interval: 10m
+    max-effect-attempts: 3
+    reconcile-grace: 30m
+
+  eval:
+    corpus-dir: "evals/cases"
+    default-repeats: 3
+    concurrency: 4
+    non-inferiority-margin: 0.05
+    long-horizon-margin: 0.10
+    bootstrap-resamples: 10000
+
+  retention:
+    debug-days: 30
+
+  session:
+    vault-path: "secret/testgen/sessions"
+    max-age: 4h

@@ -17,6 +17,7 @@ import dev.langchain4j.model.chat.request.ResponseFormatType;
 import dev.langchain4j.model.chat.response.ChatResponse;
 
 import java.util.Objects;
+import java.util.UUID;
 
 /**
  * Anthropic-backed implementation of LlmClient using low-level ChatModel API (§6.10).
@@ -48,6 +49,23 @@ public class LangChain4jLlmClient implements LlmClient {
         this.transport = new TransportRetryPolicy(props.llm().transportRetries());
     }
 
+    public LangChain4jLlmClient(com.company.testgen.config.PipelineProperties props, TokenBudgetGuard budget, PromptBundle prompts) {
+        this.modelId = props.llm().modelId();
+        this.model = AnthropicChatModel.builder()
+                .apiKey(props.llm().apiKey() != null ? props.llm().apiKey() : "dummy-key")
+                .modelName(modelId)
+                .cacheSystemMessages(props.llm().cacheSystemMessages())
+                .cacheTools(props.llm().cacheTools())
+                .temperature(props.llm().temperature())
+                .maxTokens(props.llm().maxOutputTokens())
+                .maxRetries(0)
+                .timeout(props.llm().timeout())
+                .build();
+        this.budget = Objects.requireNonNull(budget, "budget must not be null");
+        this.prompts = Objects.requireNonNull(prompts, "prompts must not be null");
+        this.transport = new TransportRetryPolicy(props.llm().transportRetries(), props.llm().transportBackoffBase());
+    }
+
     /**
      * Testing constructor allowing injection of a custom or mock ChatModel.
      */
@@ -60,30 +78,28 @@ public class LangChain4jLlmClient implements LlmClient {
         this.model = Objects.requireNonNull(model, "model must not be null");
         this.budget = Objects.requireNonNull(budget, "budget must not be null");
         this.prompts = Objects.requireNonNull(prompts, "prompts must not be null");
-        this.transport = transport != null ? transport : new TransportRetryPolicy(0);
+        this.transport = Objects.requireNonNull(transport, "transport must not be null");
     }
 
     @Override
     public ResolvedLocatorSet resolveLocators(ResolveRequest req) {
-        // ══════ CACHE-FIRST LAYOUT — the highest-leverage decision in this class ══════
-        // langchain4j-anthropic places cache_control on the last SYSTEM message and
-        // on tools. It does NOT give an ergonomic breakpoint on a user-message prefix.
-        // Therefore everything stable for this job lives in the SYSTEM message.
-        // Putting the DOM snapshot in the user message silently disables caching
-        // and roughly doubles the cost of a multi-attempt job. (§2.4, §6.10)
+        Objects.requireNonNull(req, "request must not be null");
+        UUID jobId = req.jobId() != null ? req.jobId() : UUID.randomUUID();
+
+        // ═══ CACHE-FIRST LAYOUT — the highest-leverage decision in this class ═══
+        // Everything stable for this job lives in the SYSTEM message (§2.4, §6.10).
         SystemMessage system = SystemMessage.from(String.join("\n\n---\n\n",
                 prompts.resolveSystem(),            // stable across ALL jobs
                 prompts.codingConventions(),        // stable across ALL jobs
                 req.existingCodeContextJson(),      // stable within THIS job
-                req.safeSnapshotJson()));           // stable within THIS job  ← the big one
+                req.safeSnapshotJson()));           // stable within THIS job
 
         // Volatile: the only thing that differs between retry attempts.
-        String userText = (req.attempt() == 0 || req.correctionFeedback() == null || req.correctionFeedback().isBlank())
+        UserMessage user = UserMessage.from(req.attempt() == 0
                 ? prompts.resolveTask(req.planJson())
-                : prompts.resolveTask(req.planJson()) + "\n\n" + req.correctionFeedback();
-        UserMessage user = UserMessage.from(userText);
+                : prompts.resolveTask(req.planJson()) + "\n\n" + req.correctionFeedback());
 
-        budget.assertHeadroom(req.jobId(), TokenBudgetGuard.estimateTokens(system, user));
+        budget.assertHeadroom(jobId, estimateTokens(system, user));
 
         ChatResponse response = transport.execute(() -> model.chat(ChatRequest.builder()
                 .messages(system, user)
@@ -94,23 +110,32 @@ public class LangChain4jLlmClient implements LlmClient {
                 .build()));
 
         recordUsage(req, Phase.RESOLVE, response);
-        return Json.parse(response.aiMessage().text(), ResolvedLocatorSet.class);
+        String rawText = response.aiMessage() != null ? response.aiMessage().text() : "{}";
+        return Json.parse(stripCodeFences(rawText), ResolvedLocatorSet.class);
     }
 
     @Override
     public GeneratedFileSet generateCode(GenerateRequest req) {
+        Objects.requireNonNull(req, "request must not be null");
+        UUID jobId = req.jobId() != null ? req.jobId() : UUID.randomUUID();
+
+        // ═══ CACHE-FIRST LAYOUT — matching resolveLocators (§2.4, §6.10, §6.12) ═══
+        // Stable system message cached across attempts
         SystemMessage system = SystemMessage.from(String.join("\n\n---\n\n",
-                prompts.generateSystem(),
-                prompts.codingConventions(),
-                req.codeContextJson() != null ? req.codeContextJson() : "{}"));
+                prompts.generateSystem(),           // stable across ALL jobs
+                prompts.codingConventions(),        // stable across ALL jobs
+                req.existingCodeContextJson()));    // stable within THIS job
 
-        String userText = prompts.generateTask(req.plan(), req.locators());
-        if (req.lintFeedback() != null && !req.lintFeedback().isBlank()) {
-            userText = userText + "\n\n" + req.lintFeedback();
+        // Volatile user message: task instructions plus lint feedback if regeneration attempt
+        String taskContent = prompts.generateTask(req.plan(), req.locators());
+        if (req.attempt() > 0 && req.feedback() != null && !req.feedback().isBlank()) {
+            taskContent += "\n\nLint Feedback:\n" + req.feedback();
+        } else if (req.feedback() != null && !req.feedback().isBlank()) {
+            taskContent += "\n\n" + req.feedback();
         }
-        UserMessage user = UserMessage.from(userText);
+        UserMessage user = UserMessage.from(taskContent);
 
-        budget.assertHeadroom(req.jobId(), TokenBudgetGuard.estimateTokens(system, user));
+        budget.assertHeadroom(jobId, estimateTokens(system, user));
 
         ChatResponse response = transport.execute(() -> model.chat(ChatRequest.builder()
                 .messages(system, user)
@@ -121,48 +146,51 @@ public class LangChain4jLlmClient implements LlmClient {
                 .build()));
 
         recordUsage(req, Phase.GENERATE, response);
-        return Json.parse(response.aiMessage().text(), GeneratedFileSet.class);
+        String rawText = response.aiMessage() != null ? response.aiMessage().text() : "{}";
+        return Json.parse(stripCodeFences(rawText), GeneratedFileSet.class);
+    }
+
+    private static String stripCodeFences(String raw) {
+        if (raw == null) {
+            return "{}";
+        }
+        String trimmed = raw.trim();
+        if (trimmed.startsWith("```json") && trimmed.endsWith("```")) {
+            return trimmed.substring(7, trimmed.length() - 3).trim();
+        } else if (trimmed.startsWith("```") && trimmed.endsWith("```")) {
+            return trimmed.substring(3, trimmed.length() - 3).trim();
+        }
+        return trimmed;
     }
 
     private void recordUsage(LlmRequest req, Phase phase, ChatResponse response) {
-        TokenUsage tokenUsage;
-        if (response != null && response.metadata() instanceof AnthropicChatResponseMetadata anthropicMeta) {
-            AnthropicTokenUsage u = anthropicMeta.tokenUsage();
-            if (u != null) {
-                tokenUsage = new TokenUsage(
-                        u.inputTokenCount() != null ? u.inputTokenCount() : 0,
-                        u.outputTokenCount() != null ? u.outputTokenCount() : 0,
-                        u.cacheCreationInputTokens() != null ? u.cacheCreationInputTokens() : 0,
-                        u.cacheReadInputTokens() != null ? u.cacheReadInputTokens() : 0);
-            } else {
-                tokenUsage = new TokenUsage(0, 0, 0, 0);
-            }
-        } else if (response != null && response.metadata() != null && response.metadata().tokenUsage() != null) {
-            var u = response.metadata().tokenUsage();
-            tokenUsage = new TokenUsage(
-                    u.inputTokenCount() != null ? u.inputTokenCount() : 0,
-                    u.outputTokenCount() != null ? u.outputTokenCount() : 0,
+        UUID jobId = (req != null && req.jobId() != null) ? req.jobId() : UUID.randomUUID();
+        Long attemptId = req != null ? req.attemptId() : null;
+        if (response.metadata() instanceof AnthropicChatResponseMetadata anthropicMeta
+                && anthropicMeta.tokenUsage() instanceof AnthropicTokenUsage u) {
+            budget.record(jobId, attemptId, phase, modelId, new TokenUsage(
+                    u.inputTokenCount(),
+                    u.outputTokenCount(),
+                    u.cacheCreationInputTokens() != null ? u.cacheCreationInputTokens() : 0,
+                    u.cacheReadInputTokens() != null ? u.cacheReadInputTokens() : 0
+            ));
+        } else if (response.metadata() != null && response.metadata().tokenUsage() != null) {
+            var standardUsage = response.metadata().tokenUsage();
+            budget.record(jobId, attemptId, phase, modelId, new TokenUsage(
+                    standardUsage.inputTokenCount(),
+                    standardUsage.outputTokenCount(),
                     0,
-                    0);
-        } else {
-            tokenUsage = new TokenUsage(0, 0, 0, 0);
+                    0
+            ));
         }
-        budget.record(req.jobId(), req.attemptId(), phase, modelId, tokenUsage);
     }
 
-    public String modelId() {
-        return modelId;
-    }
-
-    public ChatModel chatModel() {
-        return model;
-    }
-
-    public TokenBudgetGuard budgetGuard() {
-        return budget;
-    }
-
-    public PromptBundle promptBundle() {
-        return prompts;
+    /**
+     * Estimates tokens via character count / 3.6 heuristic (§6.10).
+     */
+    int estimateTokens(SystemMessage system, UserMessage user) {
+        int chars = (system != null ? system.text().length() : 0)
+                + (user != null ? user.singleText().length() : 0);
+        return (int) Math.ceil(chars / 3.6);
     }
 }

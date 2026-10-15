@@ -82,7 +82,8 @@ public class DomRedactor {
                     safeUrl,
                     html,
                     els,
-                    raw.capturedAt());
+                    raw.capturedAt(),
+                    raw.truncated());
 
             String jsonPayload = mapper.writeValueAsString(safe);
             String hash = IdempotencyKeyDeriver.sha256Hex(jsonPayload);
@@ -135,6 +136,14 @@ public class DomRedactor {
                 String key = attr.getKey();
                 if (!RedactionRules.isAllowed(key)) {
                     toRemove.add(key);
+                } else if (!"href".equalsIgnoreCase(key)) {
+                    String origVal = attr.getValue();
+                    if (origVal != null && !origVal.isEmpty()) {
+                        String scrubbed = scrubText(origVal, r);
+                        if (!scrubbed.equals(origVal)) {
+                            attr.setValue(scrubbed);
+                        }
+                    }
                 }
             }
             for (String k : toRemove) {

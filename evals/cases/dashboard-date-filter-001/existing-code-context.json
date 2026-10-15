@@ -1,0 +1,28 @@
+{
+  "targetArea": "dashboard",
+  "pageObjects": [
+    {
+      "className": "DashboardPage",
+      "packageName": "com.company.testgen.pages.dashboard",
+      "methods": [
+        {
+          "name": "openDateFilter",
+          "returnType": "void",
+          "parameters": []
+        },
+        {
+          "name": "getActiveDateBadgeText",
+          "returnType": "String",
+          "parameters": []
+        }
+      ],
+      "locators": [
+        {
+          "fieldName": "dateFilterButton",
+          "strategy": "TEST_ID",
+          "value": "date-filter-button"
+        }
+      ]
+    }
+  ]
+}

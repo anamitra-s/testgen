@@ -8,6 +8,7 @@ import org.jdbi.v3.core.Jdbi;
 import org.jdbi.v3.core.statement.Update;
 
 import java.sql.Timestamp;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
@@ -15,25 +16,23 @@ import java.util.Optional;
 import java.util.UUID;
 
 /**
- * Direct JDBI 3 implementation of {@link JobRepository} without any ORM indirection (§6.14, §7.3, §7.4, §9.7).
+ * JDBI 3 implementation of {@link JobRepository} (§6.14, §7.3, §7.4).
  */
 public class JdbiJobRepository implements JobRepository {
 
     private static final String INSERT_SQL = """
             INSERT INTO jobs (
-                id, idempotency_key, target_area, test_description, requester, recording_branch,
-                state, confidence_tier, failure_reason,
-                prompt_bundle_hash, model_id, orchestrator_version, recorder_version, base_commit_sha,
-                lease_owner, lease_epoch, lease_expires_at,
-                redaction_report, mr_iid, mr_url,
-                created_at, updated_at, completed_at
+                id, idempotency_key, target_area, test_description, requester,
+                recording_branch, state, confidence_tier, failure_reason,
+                prompt_bundle_hash, model_id, orchestrator_version, recorder_version,
+                base_commit_sha, lease_owner, lease_epoch, lease_expires_at,
+                redaction_report, mr_iid, mr_url, created_at, updated_at, completed_at
             ) VALUES (
-                :id, :idempotencyKey, :targetArea, :testDescription, :requester, :recordingBranch,
-                :state, :confidenceTier, :failureReason,
-                :promptBundleHash, :modelId, :orchestratorVersion, :recorderVersion, :baseCommitSha,
-                :leaseOwner, :leaseEpoch, :leaseExpiresAt,
-                CAST(:redactionReport AS jsonb), :mrIid, :mrUrl,
-                COALESCE(:createdAt, now()), COALESCE(:updatedAt, now()), :completedAt
+                :id, :idempotencyKey, :targetArea, :testDescription, :requester,
+                :recordingBranch, :state, :confidenceTier, :failureReason,
+                :promptBundleHash, :modelId, :orchestratorVersion, :recorderVersion,
+                :baseCommitSha, :leaseOwner, :leaseEpoch, :leaseExpiresAt,
+                CAST(:redactionReport AS jsonb), :mrIid, :mrUrl, :createdAt, :updatedAt, :completedAt
             )
             """;
 
@@ -46,8 +45,8 @@ public class JdbiJobRepository implements JobRepository {
             """;
 
     private static final String UPDATE_SQL = """
-            UPDATE jobs SET
-                target_area = :targetArea,
+            UPDATE jobs
+            SET target_area = :targetArea,
                 test_description = :testDescription,
                 requester = :requester,
                 recording_branch = :recordingBranch,
@@ -103,6 +102,52 @@ public class JdbiJobRepository implements JobRepository {
                    updated_at = now(),
                    lease_expires_at = :expiresAt
              WHERE id = :id AND lease_epoch = :epoch
+            """;
+
+    private static final String TOUCH_SQL = """
+            UPDATE jobs
+               SET lease_expires_at = :expiresAt,
+                   updated_at       = now()
+             WHERE id = :id AND lease_epoch = :epoch
+            """;
+
+    private static final String COMPLETE_FENCED_SQL = """
+            UPDATE jobs
+               SET state           = 'DONE',
+                   confidence_tier = :confidenceTier,
+                   mr_iid          = :mrIid,
+                   mr_url          = :mrUrl,
+                   completed_at    = now(),
+                   updated_at      = now()
+             WHERE id = :id AND lease_epoch = :epoch
+            """;
+
+    private static final String FAIL_FENCED_SQL = """
+            UPDATE jobs
+               SET state          = 'FAILED',
+                   failure_reason = :failureReason,
+                   completed_at   = now(),
+                   updated_at     = now()
+             WHERE id = :id AND lease_epoch = :epoch
+            """;
+
+    private static final String FIND_EXPIRED_NON_TERMINAL_SQL = """
+            SELECT * FROM jobs
+             WHERE state NOT IN ('DONE', 'FAILED', 'NEEDS_HUMAN_REVIEW')
+               AND lease_expires_at IS NOT NULL
+               AND lease_expires_at < :cutoff
+             ORDER BY created_at DESC
+            """;
+
+    private static final String DONE_WITHOUT_CONFIRMED_MR_SQL = """
+            SELECT j.id FROM jobs j
+             WHERE j.state = 'DONE'
+               AND NOT EXISTS (
+                   SELECT 1 FROM external_effects e
+                    WHERE e.job_id = j.id
+                      AND e.effect_type = 'MERGE_REQUEST'
+                      AND e.status = 'CONFIRMED'
+               )
             """;
 
     private static final String MARK_FAILED_SQL = """
@@ -253,6 +298,76 @@ public class JdbiJobRepository implements JobRepository {
                 .bind("epoch", leaseEpoch)
                 .bind("expiresAt", expiresAt != null ? Timestamp.from(expiresAt) : null)
                 .execute() > 0;
+    }
+
+    @Override
+    public boolean touch(UUID id, long leaseEpoch, Instant expiresAt) {
+        return jdbi.withHandle(h -> touch(h, id, leaseEpoch, expiresAt));
+    }
+
+    @Override
+    public boolean touch(Handle handle, UUID id, long leaseEpoch, Instant expiresAt) {
+        return handle.createUpdate(TOUCH_SQL)
+                .bind("id", id)
+                .bind("epoch", leaseEpoch)
+                .bind("expiresAt", expiresAt != null ? Timestamp.from(expiresAt) : null)
+                .execute() > 0;
+    }
+
+    @Override
+    public boolean completeFenced(UUID id, long leaseEpoch, String confidenceTier, Integer mrIid, String mrUrl) {
+        return jdbi.withHandle(h -> completeFenced(h, id, leaseEpoch, confidenceTier, mrIid, mrUrl));
+    }
+
+    @Override
+    public boolean completeFenced(Handle handle, UUID id, long leaseEpoch, String confidenceTier, Integer mrIid, String mrUrl) {
+        return handle.createUpdate(COMPLETE_FENCED_SQL)
+                .bind("id", id)
+                .bind("epoch", leaseEpoch)
+                .bind("confidenceTier", confidenceTier)
+                .bind("mrIid", mrIid)
+                .bind("mrUrl", mrUrl)
+                .execute() > 0;
+    }
+
+    @Override
+    public boolean failFenced(UUID id, long leaseEpoch, String failureReason) {
+        return jdbi.withHandle(h -> failFenced(h, id, leaseEpoch, failureReason));
+    }
+
+    @Override
+    public boolean failFenced(Handle handle, UUID id, long leaseEpoch, String failureReason) {
+        return handle.createUpdate(FAIL_FENCED_SQL)
+                .bind("id", id)
+                .bind("epoch", leaseEpoch)
+                .bind("failureReason", failureReason)
+                .execute() > 0;
+    }
+
+    @Override
+    public List<JobRecord> findExpiredNonTerminal(Duration age) {
+        return jdbi.withHandle(h -> findExpiredNonTerminal(h, age));
+    }
+
+    @Override
+    public List<JobRecord> findExpiredNonTerminal(Handle handle, Duration age) {
+        Instant cutoff = Instant.now().minus(age);
+        return handle.createQuery(FIND_EXPIRED_NON_TERMINAL_SQL)
+                .bind("cutoff", Timestamp.from(cutoff))
+                .mapTo(JobRecord.class)
+                .list();
+    }
+
+    @Override
+    public List<UUID> doneWithoutConfirmedMr() {
+        return jdbi.withHandle(this::doneWithoutConfirmedMr);
+    }
+
+    @Override
+    public List<UUID> doneWithoutConfirmedMr(Handle handle) {
+        return handle.createQuery(DONE_WITHOUT_CONFIRMED_MR_SQL)
+                .mapTo(UUID.class)
+                .list();
     }
 
     @Override

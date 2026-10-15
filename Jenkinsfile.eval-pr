@@ -1,0 +1,86 @@
+// Jenkinsfile.eval-pr — Fast advisory smoke evaluation on prompt/model PRs (§8.5)
+pipeline {
+  agent { label 'testgen-worker' }
+  options {
+    timeout(time: 15, unit: 'MINUTES')
+    disableConcurrentBuilds()
+    buildDiscarder(logRotator(numToKeepStr: '50'))
+  }
+  parameters {
+    string(name: 'CHANGE_ID', defaultValue: '', description: 'GitLab MR IID / GitHub PR ID')
+    string(name: 'TARGET_BRANCH', defaultValue: 'main', description: 'Base target branch')
+  }
+  stages {
+    stage('Checkout') {
+      steps {
+        checkout scm
+      }
+    }
+    stage('Build') {
+      steps {
+        sh './mvnw clean package -DskipTests'
+      }
+    }
+    stage('Eval Smoke') {
+      steps {
+        withCredentials([
+          string(credentialsId: 'anthropic-api-key', variable: 'ANTHROPIC_API_KEY'),
+          usernamePassword(credentialsId: 'testgen-db', usernameVariable: 'TESTGEN_DB_USER',
+                                                        passwordVariable: 'TESTGEN_DB_PASSWORD')
+        ]) {
+          sh '''
+            java -jar testgen-orchestrator/target/testgen-orchestrator.jar eval \\
+              --suite=smoke \\
+              --repeats=1 \\
+              --concurrency=4 \\
+              --gate=advisory \\
+              --report=eval-report.json
+          '''
+        }
+      }
+    }
+    stage('Post Advisory Comment') {
+      when {
+        expression {
+          return (params.CHANGE_ID != '' || env.CHANGE_ID != null || env.CI_MERGE_REQUEST_IID != null)
+        }
+      }
+      steps {
+        withCredentials([string(credentialsId: 'gitlab-bot-token', variable: 'GITLAB_TOKEN')]) {
+          script {
+            def mrIid = params.CHANGE_ID ?: (env.CHANGE_ID ?: env.CI_MERGE_REQUEST_IID)
+            def reportFile = 'eval-report.json'
+            if (fileExists(reportFile) && mrIid) {
+              def report = readJSON file: reportFile
+              def passRate = report.metrics?.firstAttemptPassRate != null ? "${(report.metrics.firstAttemptPassRate * 100).round(1)}%" : "N/A"
+              def exactMatch = report.metrics?.locatorExactMatchRate != null ? "${(report.metrics.locatorExactMatchRate * 100).round(1)}%" : "N/A"
+              def commentBody = """### 📊 TestGen Prompt/Model Eval Report (Advisory)
+- **Suite:** `${report.suite ?: 'smoke'}` (repeats: ${report.repeats ?: 1})
+- **Status:** `${report.status ?: 'PASS'}`
+- **First Attempt Pass Rate:** `${passRate}`
+- **Locator Exact Match Rate:** `${exactMatch}`
+- **Build URL:** ${env.BUILD_URL}
+_Note: PR gate is advisory only (§8.5). Real quality gate runs nightly._"""
+
+              // Post advisory note to GitLab MR
+              def projectId = env.CI_PROJECT_ID ?: env.GITLAB_PROJECT_ID ?: 'qa%2Ftestgen-orchestrator'
+              def gitlabApiUrl = env.GITLAB_API_URL ?: 'https://gitlab.example.com/api/v4'
+              sh """
+                curl -s -X POST "${gitlabApiUrl}/projects/${projectId}/merge_requests/${mrIid}/notes" \\
+                  -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \\
+                  -H "Content-Type: application/json" \\
+                  -d '{"body": ${groovy.json.JsonOutput.toJson(commentBody)}}' || true
+              """
+            }
+          }
+        }
+      }
+    }
+  }
+  post {
+    always {
+      archiveArtifacts artifacts: 'eval-report.json', allowEmptyArchive: true
+      cleanWs()
+    }
+  }
+}

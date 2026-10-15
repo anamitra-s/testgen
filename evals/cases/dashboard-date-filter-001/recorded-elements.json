@@ -1,0 +1,125 @@
+{
+  "contractVersion": 2,
+  "recorderVersion": "3.1.0",
+  "capturedAt": "2026-03-14T10:22:00Z",
+  "targetArea": "dashboard",
+  "baseUrl": "https://app.example.com",
+  "snapshots": [
+    {
+      "stateId": "s0",
+      "url": "https://app.example.com/dashboard",
+      "prunedHtml": "<!DOCTYPE html><html><head><title>Analytics Dashboard</title></head><body><header><nav aria-label=\"Main Navigation\"><a href=\"/dashboard\">Dashboard</a></nav></header><main><div class=\"toolbar\"><button data-testid=\"date-filter-button\" aria-label=\"Filter dates\">Date Filter</button></div><div id=\"filter-modal\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"modal-title\"><h2 id=\"modal-title\">Select Date Range</h2><form><label for=\"start-date\">Start Date</label><input id=\"start-date\" type=\"date\" name=\"startDate\" /><label for=\"end-date\">End Date</label><input id=\"end-date\" type=\"date\" name=\"endDate\" /><button type=\"button\" role=\"button\">Apply Filter</button></form></div><div class=\"results-view\"><span data-testid=\"active-date-badge\" class=\"badge\">2026-03-01 to 2026-03-14</span></div></main></body></html>",
+      "prunedNodeCount": 25,
+      "truncated": false
+    }
+  ],
+  "interactions": [
+    {
+      "elementRefId": "date-filter-btn",
+      "stateId": "s0",
+      "actionIndex": 0,
+      "tagName": "button",
+      "role": "button",
+      "accessibleName": "Filter dates",
+      "textContent": "Date Filter",
+      "attributes": {
+        "data-testid": "date-filter-button",
+        "aria-label": "Filter dates"
+      },
+      "fingerprint": {
+        "tagName": "button",
+        "role": "button",
+        "accessibleName": "Filter dates",
+        "normalizedText": "Date Filter",
+        "ordinalAmongRolePeers": 0,
+        "domPathHash": "sha256:dfb"
+      }
+    },
+    {
+      "elementRefId": "start-date-input",
+      "stateId": "s0",
+      "actionIndex": 1,
+      "tagName": "input",
+      "role": "textbox",
+      "accessibleName": "Start Date",
+      "textContent": "",
+      "attributes": {
+        "id": "start-date",
+        "type": "date",
+        "name": "startDate"
+      },
+      "fingerprint": {
+        "tagName": "input",
+        "role": "textbox",
+        "accessibleName": "Start Date",
+        "normalizedText": "",
+        "ordinalAmongRolePeers": 0,
+        "domPathHash": "sha256:sdi"
+      }
+    },
+    {
+      "elementRefId": "end-date-input",
+      "stateId": "s0",
+      "actionIndex": 2,
+      "tagName": "input",
+      "role": "textbox",
+      "accessibleName": "End Date",
+      "textContent": "",
+      "attributes": {
+        "id": "end-date",
+        "type": "date",
+        "name": "endDate"
+      },
+      "fingerprint": {
+        "tagName": "input",
+        "role": "textbox",
+        "accessibleName": "End Date",
+        "normalizedText": "",
+        "ordinalAmongRolePeers": 1,
+        "domPathHash": "sha256:edi"
+      }
+    },
+    {
+      "elementRefId": "apply-filter-btn",
+      "stateId": "s0",
+      "actionIndex": 3,
+      "tagName": "button",
+      "role": "button",
+      "accessibleName": "Apply Filter",
+      "textContent": "Apply Filter",
+      "attributes": {
+        "type": "button",
+        "role": "button"
+      },
+      "fingerprint": {
+        "tagName": "button",
+        "role": "button",
+        "accessibleName": "Apply Filter",
+        "normalizedText": "Apply Filter",
+        "ordinalAmongRolePeers": 1,
+        "domPathHash": "sha256:afb"
+      }
+    },
+    {
+      "elementRefId": "filter-badge",
+      "stateId": "s0",
+      "actionIndex": 4,
+      "tagName": "span",
+      "role": null,
+      "accessibleName": "2026-03-01 to 2026-03-14",
+      "textContent": "2026-03-01 to 2026-03-14",
+      "attributes": {
+        "data-testid": "active-date-badge",
+        "class": "badge"
+      },
+      "fingerprint": {
+        "tagName": "span",
+        "role": null,
+        "accessibleName": "2026-03-01 to 2026-03-14",
+        "normalizedText": "2026-03-01 to 2026-03-14",
+        "ordinalAmongRolePeers": 0,
+        "domPathHash": "sha256:fb"
+      }
+    }
+  ]
+}

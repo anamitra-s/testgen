@@ -1,0 +1,56 @@
+// Jenkinsfile.eval-nightly — Golden corpus nightly evaluation (§8.5)
+pipeline {
+  agent { label 'testgen-worker' }
+  triggers { cron('H 2 * * *') }
+  options {
+    timeout(time: 60, unit: 'MINUTES')
+    disableConcurrentBuilds()
+    buildDiscarder(logRotator(numToKeepStr: '90'))
+  }
+  stages {
+    stage('Checkout') {
+      steps {
+        git branch: 'main', url: env.ORCHESTRATOR_REPO_URL ?: 'https://gitlab.example.com/qa/testgen-orchestrator.git'
+      }
+    }
+    stage('Build') {
+      steps {
+        sh './mvnw clean package -DskipTests'
+      }
+    }
+    stage('Eval') {
+      steps {
+        withCredentials([
+          string(credentialsId: 'anthropic-api-key', variable: 'ANTHROPIC_API_KEY'),
+          usernamePassword(credentialsId: 'testgen-db', usernameVariable: 'TESTGEN_DB_USER',
+                                                        passwordVariable: 'TESTGEN_DB_PASSWORD')
+        ]) {
+          sh '''
+            java -jar testgen-orchestrator/target/testgen-orchestrator.jar eval \\
+              --suite=golden \\
+              --repeats=3 \\
+              --concurrency=4 \\
+              --gate=blocking \\
+              --report=eval-report.json
+          '''
+        }
+      }
+    }
+  }
+  post {
+    always {
+      archiveArtifacts artifacts: 'eval-report.json', allowEmptyArchive: true
+      cleanWs()
+    }
+    success {
+      slackSend channel: '#qa-automation',
+                color: 'good',
+                message: "✅ Nightly eval PASSED — golden suite verified against baseline: ${env.BUILD_URL}"
+    }
+    failure {
+      slackSend channel: '#qa-automation',
+                color: 'danger',
+                message: "🔴 Nightly eval GATE FAILED — quality regression detected: ${env.BUILD_URL}"
+    }
+  }
+}

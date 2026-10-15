@@ -1,0 +1,7 @@
+version: v7
+name: default-bundle
+description: "Production v7 prompt bundle for Playwright-Java test generation"
+files:
+  resolve_system: resolve.system.md
+  generate_system: generate.system.md
+  conventions: conventions.md
