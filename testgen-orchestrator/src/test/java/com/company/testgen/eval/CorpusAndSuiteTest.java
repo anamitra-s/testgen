@@ -10,6 +10,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -60,6 +61,42 @@ class CorpusAndSuiteTest {
         assertThat(dateBtn).isNotNull();
         assertThat(dateBtn.strategy()).isEqualTo(LocatorStrategy.TEST_ID);
         assertThat(dateBtn.value()).isEqualTo("date-filter-button");
+    }
+
+    @Test
+    @DisplayName("smoke clamps selection to available active cases when fewer than 10 cases exist (Assumption A-04)")
+    void testSmokeClampingOnSmallCorpus() {
+        Path evalsDir = Path.of("evals");
+        Corpus corpus = Corpus.load(evalsDir);
+
+        SuiteSpec smoke = corpus.suite("smoke");
+        assertThat(smoke.cases()).isEqualTo("10");
+
+        // When only 1 active case exists in evals/cases, load(smoke) must not throw IndexOutOfBoundsException
+        // and must clamp to Math.min(10, activeCases.size()) = 1
+        List<EvalCase> smokeCases = corpus.load(smoke);
+        assertThat(smokeCases).hasSize(Math.min(10, corpus.activeCases().size()));
+        assertThat(smokeCases).allMatch(EvalCase::isActive);
+    }
+
+    @Test
+    @DisplayName("Corpus.load excludes quarantined and retired cases from suite execution (§8.7)")
+    void testQuarantinedAndRetiredCasesExcluded() {
+        EvalCase activeCase = new EvalCase("active-1", "dashboard", "", "", null, "easy", List.of(), "", EvalCase.STATUS_ACTIVE, "", null, null, null, null);
+        EvalCase quarantinedCase = new EvalCase("quarantined-1", "dashboard", "", "", null, "medium", List.of(), "", EvalCase.STATUS_QUARANTINED, "", null, null, null, null);
+        EvalCase retiredCase = new EvalCase("retired-1", "composer", "", "", null, "hard", List.of(), "", EvalCase.STATUS_RETIRED, "", null, null, null, null);
+
+        Corpus customCorpus = new Corpus(Path.of("evals"), Map.of(), List.of(activeCase, quarantinedCase, retiredCase));
+
+        assertThat(customCorpus.activeCases()).containsExactly(activeCase);
+
+        SuiteSpec smoke = SuiteSpec.smoke();
+        List<EvalCase> smokeLoaded = customCorpus.load(smoke);
+        assertThat(smokeLoaded).containsExactly(activeCase);
+
+        SuiteSpec golden = SuiteSpec.golden();
+        List<EvalCase> goldenLoaded = customCorpus.load(golden);
+        assertThat(goldenLoaded).containsExactly(activeCase);
     }
 
     @Test

@@ -4,11 +4,11 @@ testgen:
     required-contract-version: 2
 
   llm:
-    provider: anthropic
-    model-id: "claude-sonnet-5"          # PIN A DATED SNAPSHOT — floating aliases are silent drift
+    provider: ${TESTGEN_LLM_PROVIDER:anthropic}
+    model-id: ${TESTGEN_LLM_MODEL:claude-sonnet-5}          # PIN A DATED SNAPSHOT — floating aliases are silent drift
     candidate-model-id: ""               # canary target (§8.6); empty disables
     canary-percent: 0
-    api-key: ${ANTHROPIC_API_KEY}
+    api-key: ${GEMINI_API_KEY:${ANTHROPIC_API_KEY:}}
     max-output-tokens: 8192
     temperature: 0.0
     timeout: 120s
@@ -22,6 +22,9 @@ testgen:
     max-usd-per-job: 2.50
     price-book:                          # $ per Mtok; update when vendor pricing changes
       claude-sonnet-5: { input: 3.00, output: 15.00, cache-write: 3.75, cache-read: 0.30 }
+      gemini-2.5-flash: { input: 0.15, output: 0.60, cache-write: 0.0, cache-read: 0.0 }
+      gemini-2.5-pro: { input: 1.25, output: 5.00, cache-write: 0.0, cache-read: 0.0 }
+      mock-model: { input: 0.0, output: 0.0, cache-write: 0.0, cache-read: 0.0 }
 
   retry:
     max-attempts: 3

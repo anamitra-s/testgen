@@ -5,6 +5,7 @@ import com.company.testgen.model.TestGenerationJob;
 import com.company.testgen.persistence.EffectRecord;
 import com.company.testgen.persistence.EffectRepository;
 import com.company.testgen.persistence.EffectStatus;
+import com.company.testgen.util.Json;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -17,11 +18,12 @@ import java.util.function.Supplier;
  * Exactly-once side-effect executor backed by external_effects intent ledger (§7.5).
  * Enforces MAX_EFFECT_ATTEMPTS (3).
  *
- * 1. Reserve — INSERT (job, type, key) PENDING. Unique constraint guarantees single reserver.
+ * 1. Reserve — INSERT (job, type, key) PENDING with leaseEpoch. Unique constraint guarantees single reserver.
  * 2. Perform — external operation.
- * 3. Confirm — UPDATE to CONFIRMED with external ID.
+ * 3. Confirm — UPDATE to CONFIRMED with external ID, fenced by leaseEpoch.
  *
  * If prior run left a PENDING row, reconciles against external system before retrying.
+ * If prior run CONFIRMED, rehydrates the full typed result across restarts (§7.5).
  */
 public class EffectExecutor {
 
@@ -77,16 +79,16 @@ public class EffectExecutor {
             Optional<T> found = reconcile.get();
             if (found.isPresent()) {
                 String externalId = idOf(found.get());
-                effects.confirm(jobId, type, effectKey, externalId);
+                effects.confirm(jobId, leaseEpoch, type, effectKey, externalId);
                 log.info("Reconciled orphaned PENDING effect {}/{} for job {} (externalId={})",
                         type, effectKey, jobId, externalId);
                 return found.get();
             }
 
-            effects.incrementAttempts(jobId, type, effectKey);
+            effects.incrementAttempts(jobId, leaseEpoch, type, effectKey);
             int newAttempts = prior.get().attempts() + 1;
             if (newAttempts >= MAX_EFFECT_ATTEMPTS) {
-                effects.abandon(jobId, type, effectKey, "EXHAUSTED");
+                effects.abandon(jobId, leaseEpoch, type, effectKey, "EXHAUSTED");
                 log.error("Effect {}/{} for job {} exceeded MAX_EFFECT_ATTEMPTS ({})",
                         type, effectKey, jobId, MAX_EFFECT_ATTEMPTS);
                 throw new EffectExhaustedException(type, effectKey);
@@ -108,22 +110,9 @@ public class EffectExecutor {
         FaultInjector.checkpoint("after-action-before-confirm");
 
         String externalId = idOf(result);
-        effects.confirm(jobId, type, effectKey, externalId);
+        effects.confirm(jobId, leaseEpoch, type, effectKey, externalId);
         log.info("Confirmed effect {}/{} for job {} with externalId {}", type, effectKey, jobId, externalId);
         return result;
-    }
-
-    /**
-     * Backward-compatibility overload accepting {@link com.company.testgen.persistence.EffectType}.
-     */
-    public <T> T exactlyOnce(
-            TestGenerationJob job,
-            com.company.testgen.persistence.EffectType type,
-            String effectKey,
-            Supplier<T> action,
-            Supplier<Optional<T>> reconcile
-    ) {
-        return exactlyOnce(job, type.toIdempotencyType(), effectKey, action, reconcile);
     }
 
     public EffectRepository effects() {
@@ -133,6 +122,9 @@ public class EffectExecutor {
     protected String idOf(Object result) {
         if (result == null) return null;
         if (result instanceof String s) return s;
+        if (result instanceof MergeRequestResult mr) {
+            return Json.stringify(mr);
+        }
         return result.toString();
     }
 
@@ -148,7 +140,22 @@ public class EffectExecutor {
         }
 
         String extId = record.externalId();
-        if (extId != null && extId.startsWith("MergeRequestResult[") && extId.endsWith("]")) {
+        if (extId == null) {
+            return null;
+        }
+
+        // Try JSON deserialization
+        if (extId.startsWith("{") && extId.endsWith("}")) {
+            try {
+                MergeRequestResult mr = Json.parse(extId, MergeRequestResult.class);
+                if (mr != null && mr.webUrl() != null) {
+                    return (T) mr;
+                }
+            } catch (Exception ignored) {}
+        }
+
+        // Try Record.toString() format: MergeRequestResult[iid=101, webUrl=https://...]
+        if (extId.startsWith("MergeRequestResult[") && extId.endsWith("]")) {
             try {
                 String inner = extId.substring("MergeRequestResult[".length(), extId.length() - 1);
                 String[] parts = inner.split(",\\s*");
@@ -162,7 +169,9 @@ public class EffectExecutor {
                         webUrl = part.substring(7);
                     }
                 }
-                return (T) new MergeRequestResult(iid, webUrl);
+                if (webUrl != null) {
+                    return (T) new MergeRequestResult(iid, webUrl);
+                }
             } catch (Exception ignored) {}
         }
 

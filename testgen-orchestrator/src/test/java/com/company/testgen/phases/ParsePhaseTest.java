@@ -1,4 +1,4 @@
-package com.company.testgen.phase;
+package com.company.testgen.phases;
 
 import com.company.testgen.model.ParsedTestPlan;
 import com.company.testgen.model.TestGenerationJob;
@@ -29,7 +29,7 @@ class ParsePhaseTest {
                     {
                       "stateId": "s0",
                       "url": "https://app.example.com/dashboard",
-                      "prunedHtml": "<main id=\\"root\\"><button data-testid=\\"date-filter-trigger\\">Last 30 days</button></main>",
+                      "prunedHtml": "<main id=\\\"root\\\"><button data-testid=\\\"date-filter-trigger\\\">Last 30 days</button></main>",
                       "prunedNodeCount": 2,
                       "truncated": false
                     }
@@ -98,7 +98,7 @@ class ParsePhaseTest {
                     {
                       "stateId": "s0",
                       "url": "https://app.example.com/login",
-                      "prunedHtml": "<form><input type=\\"password\\" name=\\"pwd\\"/><button>Sign in</button></form>"
+                      "prunedHtml": "<form><input type=\\\"password\\\" name=\\\"pwd\\\"/><button>Sign in</button></form>"
                     }
                   ],
                   "interactions": [
@@ -140,7 +140,7 @@ class ParsePhaseTest {
                     {
                       "stateId": "s0",
                       "url": "https://app.example.com/settings",
-                      "prunedHtml": "<form><button data-testid=\\"delete-account-btn\\">Delete Account</button></form>"
+                      "prunedHtml": "<form><button data-testid=\\\"delete-account-btn\\\">Delete Account</button></form>"
                     }
                   ],
                   "interactions": [
@@ -206,12 +206,5 @@ class ParsePhaseTest {
         assertThat(plan.actions().get(0).value()).isEqualTo("Jane Doe");
         assertThat(plan.actions().get(1).type()).isEqualTo("click");
         assertThat(plan.mutatesData()).isTrue(); // "Save profile" is a mutation
-    }
-
-    @Test
-    @DisplayName("Plural package alias com.company.testgen.phases.ParsePhase behaves identically")
-    void testPluralAlias() {
-        com.company.testgen.phases.ParsePhase pluralPhase = new com.company.testgen.phases.ParsePhase();
-        assertThat(pluralPhase).isInstanceOf(com.company.testgen.phase.ParsePhase.class);
     }
 }

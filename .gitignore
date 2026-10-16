@@ -3,12 +3,12 @@ target/
 !**/src/main/**/target/
 !**/src/test/**/target/
 .kotlin
+dependency-reduced-pom.xml
+local-output/
+job-summary.json
 
 ### IntelliJ IDEA ###
-.idea/modules.xml
-.idea/jarRepositories.xml
-.idea/compiler.xml
-.idea/libraries/
+.idea/
 *.iws
 *.iml
 *.ipr

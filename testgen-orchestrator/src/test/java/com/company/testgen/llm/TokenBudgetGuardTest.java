@@ -2,6 +2,8 @@ package com.company.testgen.llm;
 
 import com.company.testgen.model.Phase;
 import com.company.testgen.model.TokenUsage;
+import com.company.testgen.persistence.CostEventRepository;
+import com.company.testgen.persistence.InMemoryCostEventRepository;
 import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.UserMessage;
 import org.junit.jupiter.api.BeforeEach;

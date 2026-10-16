@@ -200,12 +200,12 @@ public class LintPhase {
                     errors.add("Package sanity check failed: Test file %s declared package '%s' but must start with 'com.company.tests'."
                             .formatted(path, pkgName));
                 }
-                // Verify test class imports JUnit 5
-                boolean hasJunit5 = cu.getImports().stream()
+                // Verify test class imports JUnit 5 or TestNG
+                boolean hasTestFramework = cu.getImports().stream()
                         .map(ImportDeclaration::getNameAsString)
-                        .anyMatch(imp -> imp.startsWith("org.junit.jupiter.api"));
-                if (!hasJunit5) {
-                    errors.add("Import sanity check failed: Test file %s does not import JUnit 5 (org.junit.jupiter.api.*)."
+                        .anyMatch(imp -> imp.startsWith("org.junit.jupiter.api") || imp.startsWith("org.testng.annotations"));
+                if (!hasTestFramework) {
+                    errors.add("Import sanity check failed: Test file %s does not import JUnit 5 (org.junit.jupiter.api.*) or TestNG (org.testng.annotations.*)."
                             .formatted(path));
                 }
             } else if (isPageFile) {

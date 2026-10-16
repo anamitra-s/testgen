@@ -26,7 +26,7 @@ public final class LocatorRenderer {
                     "page.getByTestId(%s)".formatted(q(l.value()));
             case ROLE_NAME -> {
                 String role = (l.role() != null && !l.role().isBlank())
-                        ? l.role().toUpperCase(Locale.ROOT)
+                        ? l.role().trim().toUpperCase(Locale.ROOT)
                         : "UNKNOWN";
                 yield "page.getByRole(AriaRole.%s, new Page.GetByRoleOptions().setName(%s).setExact(true))"
                         .formatted(role, q(l.value()));

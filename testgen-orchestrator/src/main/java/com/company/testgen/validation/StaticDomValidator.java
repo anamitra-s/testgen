@@ -2,6 +2,7 @@ package com.company.testgen.validation;
 
 import com.company.testgen.model.DomElementSnapshot;
 import com.company.testgen.model.ElementFingerprint;
+import com.company.testgen.model.LocatorStrategy;
 import com.company.testgen.model.PageSnapshot;
 import com.company.testgen.model.ParsedTestPlan;
 import com.company.testgen.model.ResolvedLocator;
@@ -56,6 +57,12 @@ public class StaticDomValidator {
         JsoupCache jsoupCache = new JsoupCache();
 
         for (ResolvedLocator loc : set.locators()) {
+            if (loc == null || loc.strategy() == null
+                    || loc.value() == null || loc.value().isBlank()
+                    || (loc.strategy() == LocatorStrategy.ROLE_NAME && !AriaRoles.isValid(loc.role()))) {
+                continue;
+            }
+
             PageSnapshot snapshot = plan.snapshotFor(loc.elementRefId());
 
             if (snapshot == null || !snapshot.hasHtml()) {
@@ -101,7 +108,7 @@ public class StaticDomValidator {
         List<ValidationViolation> violations = new ArrayList<>();
         violations.add(new ValidationViolation(
                 safeRender(loc),
-                loc.elementRefId(),
+                loc != null ? loc.elementRefId() : null,
                 "DEGRADED_NO_HTML",
                 -1,
                 Severity.ADVISORY,
@@ -163,14 +170,21 @@ public class StaticDomValidator {
     }
 
     private static ValidationViolation blocking(ResolvedLocator l, String reasonCode, int matchCount, String detail) {
-        return new ValidationViolation(safeRender(l), l.elementRefId(), reasonCode, matchCount, Severity.BLOCKING, detail);
+        return new ValidationViolation(safeRender(l), l != null ? l.elementRefId() : null, reasonCode, matchCount, Severity.BLOCKING, detail);
     }
 
     private static ValidationViolation advisory(ResolvedLocator l, String reasonCode, int matchCount, String detail) {
-        return new ValidationViolation(safeRender(l), l.elementRefId(), reasonCode, matchCount, Severity.ADVISORY, detail);
+        return new ValidationViolation(safeRender(l), l != null ? l.elementRefId() : null, reasonCode, matchCount, Severity.ADVISORY, detail);
     }
 
     private static String safeRender(ResolvedLocator l) {
+        if (l == null || l.strategy() == null) {
+            return null;
+        }
+        if (l.value() == null || l.value().isBlank()
+                || (l.strategy() == LocatorStrategy.ROLE_NAME && !AriaRoles.isValid(l.role()))) {
+            return l.strategy() + ":" + l.value();
+        }
         try {
             return LocatorRenderer.render(l);
         } catch (Exception e) {

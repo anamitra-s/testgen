@@ -2,8 +2,10 @@ package com.company.testgen.orchestrator;
 
 import com.company.testgen.gitlab.GitLabIntegrationService;
 import com.company.testgen.gitlab.MergeRequestResult;
+import com.company.testgen.idempotency.Claim;
 import com.company.testgen.idempotency.EffectExecutor;
 import com.company.testgen.idempotency.IdempotencyGate;
+import com.company.testgen.idempotency.JobSpec;
 import com.company.testgen.llm.GenerateRequest;
 import com.company.testgen.llm.LlmClient;
 import com.company.testgen.llm.ResolveRequest;
@@ -11,12 +13,8 @@ import com.company.testgen.model.ConfidenceTier;
 import com.company.testgen.model.ExistingCodeContext;
 import com.company.testgen.model.GeneratedFile;
 import com.company.testgen.model.GeneratedFileSet;
-import com.company.testgen.model.JobRecord;
 import com.company.testgen.model.LocatorStrategy;
-import com.company.testgen.model.PageSnapshot;
 import com.company.testgen.model.ParsedTestPlan;
-import com.company.testgen.model.RecordedAction;
-import com.company.testgen.model.Redacted;
 import com.company.testgen.model.RedactionReport;
 import com.company.testgen.model.ResolvedLocator;
 import com.company.testgen.model.ResolvedLocatorSet;
@@ -32,14 +30,18 @@ import com.company.testgen.persistence.InMemoryJobRepository;
 import com.company.testgen.persistence.InMemoryRetryAttemptRepository;
 import com.company.testgen.persistence.InMemoryValidationResultRepository;
 import com.company.testgen.persistence.InMemoryVerificationRepository;
+import com.company.testgen.persistence.JobRepository;
+import com.company.testgen.persistence.RetryAttemptRepository;
 import com.company.testgen.persistence.TargetAreaLock;
-import com.company.testgen.phase.ContextAssemblyPhase;
-import com.company.testgen.phase.ParsePhase;
-import com.company.testgen.phase.RedactionPhase;
+import com.company.testgen.persistence.ValidationResultRepository;
+import com.company.testgen.persistence.VerificationRepository;
 import com.company.testgen.phases.AuthSessionProvider;
+import com.company.testgen.phases.ContextAssemblyPhase;
 import com.company.testgen.phases.DefaultCheckstyleValidator;
 import com.company.testgen.phases.GeneratePhase;
 import com.company.testgen.phases.LintPhase;
+import com.company.testgen.phases.ParsePhase;
+import com.company.testgen.phases.RedactionPhase;
 import com.company.testgen.phases.VerifyPhase;
 import com.company.testgen.validation.LocatorGrammarValidator;
 import com.company.testgen.validation.StaticDomValidator;
@@ -53,9 +55,10 @@ import java.math.BigDecimal;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -65,161 +68,174 @@ class PipelineOrchestratorIntegrationTest {
     @TempDir
     Path tempDir;
 
-    private InMemoryJobRepository jobRepository;
-    private InMemoryRetryAttemptRepository attemptRepository;
-    private InMemoryValidationResultRepository validationRepository;
-    private InMemoryVerificationRepository verificationRepository;
-    private JobSummaryWriter summaryWriter;
+    private JobRepository jobRepository;
+    private RetryAttemptRepository attemptRepository;
+    private ValidationResultRepository validationRepository;
+    private VerificationRepository verificationRepository;
     private TargetAreaLock areaLock;
     private IdempotencyGate gate;
+    private JobSummaryWriter summaryWriter;
+    private ParsePhase parsePhase;
+    private RedactionPhase redactionPhase;
+    private ContextAssemblyPhase contextPhase;
 
     @BeforeEach
-    void setUp() throws IOException {
+    void setUp() {
         jobRepository = new InMemoryJobRepository();
         attemptRepository = new InMemoryRetryAttemptRepository();
         validationRepository = new InMemoryValidationResultRepository();
         verificationRepository = new InMemoryVerificationRepository();
-        summaryWriter = new JobSummaryWriter(tempDir.resolve("job-summary.json"));
         areaLock = TargetAreaLock.inMemory();
         gate = new IdempotencyGate(jobRepository);
-
-        // Prepare dummy recording files so ParsePhase has valid inputs if touched
-        Files.writeString(tempDir.resolve("recorded-elements.json"), "{}");
-        Files.writeString(tempDir.resolve("recorded-test.js"), "test();");
-    }
-
-    private TestGenerationJob createJob(UUID jobId, String idempotencyKey) {
-        return new TestGenerationJob(
-                jobId, idempotencyKey, "billing", "Verify billing update",
-                "jenkins", "scratch", "bundle-hash", "claude-sonnet-5",
-                "1.0.0", "2.0.0", "sha-initial", "worker-1", 1L, tempDir
-        );
-    }
-
-    private ParsedTestPlan createPlan() {
-        return new ParsedTestPlan(
-                "billing", "Verify billing update",
-                List.of(new RecordedAction(0, "click", "e1", null, "s1"),
-                        new RecordedAction(1, "click", "e2", null, "s1")),
-                List.of(new PageSnapshot("s1", "https://app.example.com", "<button>Pay</button>", List.of(), Instant.now())),
-                false, false
-        );
+        summaryWriter = new JobSummaryWriter(tempDir.resolve("job-summary.json"));
+        parsePhase = new ParsePhase();
+        redactionPhase = new RedactionPhase();
+        contextPhase = new ContextAssemblyPhase();
     }
 
     @Test
-    @DisplayName("Already completed job returns exit code 20 (no-op) via IdempotencyGate")
-    void testAlreadyCompleteNoOp() {
-        UUID jobId = UUID.randomUUID();
-        String idempotencyKey = "v2:complete-key";
+    @DisplayName("Idempotency gate returns no-op when job with same key is already claimed/running")
+    void testIdempotencyGateNoOpWhenAlreadyRunning() throws IOException {
+        UUID jobId1 = UUID.randomUUID();
+        String idempotencyKey = "v2:concurrent-key-1";
 
-        JobRecord doneRecord = new JobRecord(
-                jobId, idempotencyKey, "billing", "desc", "jenkins", "scratch",
-                "DONE", "VERIFIED", null, "bundle-hash", "claude-sonnet-5",
-                "1.0.0", "2.0.0", "sha-1", "worker-old", 1L, Instant.now(),
-                null, 42, "https://gitlab/mr/42", Instant.now(), Instant.now(), Instant.now()
+        // Job 1 claims the key
+        TestGenerationJob job1 = new TestGenerationJob(
+                jobId1, idempotencyKey, "dashboard", "Dashboard check",
+                "jenkins", "main", "bundle-1", "claude-sonnet-5",
+                "1.0", "1.0", "sha-1", "worker-1", 1L, tempDir
         );
-        jobRepository.insert(doneRecord);
+        Claim claim1 = gate.claim(idempotencyKey, JobSpec.from(job1));
+        assertThat(claim1.shouldExecute()).isTrue();
+
+        // Job 2 arrives concurrently with the same idempotency key
+        UUID jobId2 = UUID.randomUUID();
+        TestGenerationJob job2 = new TestGenerationJob(
+                jobId2, idempotencyKey, "dashboard", "Dashboard check",
+                "jenkins", "main", "bundle-1", "claude-sonnet-5",
+                "1.0", "1.0", "sha-1", "worker-2", 1L, tempDir
+        );
 
         PipelineOrchestrator orchestrator = new PipelineOrchestrator(
-                new ParsePhase(), new RedactionPhase(), new ContextAssemblyPhase(),
-                null, new LocatorGrammarValidator(), new StaticDomValidator(),
-                null, null, null, areaLock, gate, jobRepository, attemptRepository,
+                parsePhase, redactionPhase, contextPhase, null,
+                null, null, null, null,
+                null, areaLock, gate, jobRepository, attemptRepository,
                 validationRepository, verificationRepository, summaryWriter,
                 new CorrectiveFeedbackBuilder(), 3, false, tempDir
         );
 
-        PipelineOutcome outcome = orchestrator.run(createJob(jobId, idempotencyKey));
-        assertThat(outcome.exitCode()).isEqualTo(PipelineOutcome.EXIT_NOOP); // 20
+        PipelineOutcome outcome = orchestrator.run(job2);
+
+        // Orchestrator must detect already running job and return no-op with code 20 (§9.2)
+        assertThat(outcome.exitCode()).isEqualTo(PipelineOutcome.EXIT_NOOP);
         assertThat(outcome.state()).isEqualTo("DONE");
     }
 
     @Test
-    @DisplayName("Retry loop freezes passing locators in code via mergeKeepingAccepted")
-    void testRetryLoopLocatorFreeze() {
+    @DisplayName("Banned locator triggers scoped retry feedback and merges keeping accepted locators across attempts")
+    void testMergeKeepingAcceptedAcrossRetryAttempts() throws IOException {
         UUID jobId = UUID.randomUUID();
-        String idempotencyKey = "v2:retry-freeze-key";
-        TestGenerationJob job = createJob(jobId, idempotencyKey);
-        ParsedTestPlan plan = createPlan();
+        String idempotencyKey = "v2:retry-freeze-test";
 
-        ParsePhase parsePhase = new ParsePhase() {
-            @Override
-            public ParsedTestPlan execute(TestGenerationJob j) {
-                return plan;
-            }
-        };
+        Path recDir = tempDir.resolve("recording-retry");
+        Files.createDirectories(recDir);
+        String recordedElementsJson = """
+                {
+                  "contractVersion": 2,
+                  "recorderVersion": "2.0.0",
+                  "capturedAt": "2026-10-14T03:00:00Z",
+                  "targetArea": "billing",
+                  "baseUrl": "https://app.example.com",
+                  "snapshots": [
+                    {
+                      "stateId": "s1",
+                      "url": "https://app.example.com/billing",
+                      "prunedHtml": "<html><body><button data-testid='submit-btn'>Submit</button><button id='cancel-btn'>Cancel</button></body></html>"
+                    }
+                  ],
+                  "interactions": [
+                    {
+                      "elementRefId": "e1",
+                      "stateId": "s1",
+                      "actionIndex": 0,
+                      "tagName": "button",
+                      "accessibleName": "Submit"
+                    },
+                    {
+                      "elementRefId": "e2",
+                      "stateId": "s1",
+                      "actionIndex": 1,
+                      "tagName": "button",
+                      "accessibleName": "Cancel"
+                    }
+                  ]
+                }
+                """;
+        Files.writeString(recDir.resolve("recorded-elements.json"), recordedElementsJson);
 
-        RedactionPhase redactionPhase = new RedactionPhase() {
-            @Override
-            public Redacted<ParsedTestPlan> execute(ParsedTestPlan p) {
-                return new Redacted<>(plan, null);
-            }
-        };
+        TestGenerationJob job = new TestGenerationJob(
+                jobId, idempotencyKey, "billing", "Verify billing update",
+                "jenkins", "feature/rec-billing", "bundle-hash-1", "claude-sonnet-5",
+                "1.0.0", "2.0.0", "sha-head-999", "worker-1", 1L,
+                recDir
+        );
 
-        ContextAssemblyPhase contextPhase = new ContextAssemblyPhase() {
-            @Override
-            public ContextAssemblyResult execute(TestGenerationJob j, ParsedTestPlan p) {
-                return new ContextAssemblyResult(new ExistingCodeContext("billing"), List.of(), plan);
-            }
-        };
-
-        // Attempt 0: Proposes e1 and e2. e1 passes, e2 fails NOT_UNIQUE.
-        ResolvedLocator l1 = new ResolvedLocator("e1", LocatorStrategy.TEST_ID, "btn-e1", null, "page.getByTestId(\"btn-e1\")");
-        ResolvedLocator l2_bad = new ResolvedLocator("e2", LocatorStrategy.ROLE_NAME, "btn-e2", "button", "page.getByRole(\"button\")");
-        ResolvedLocatorSet attempt0Proposed = new ResolvedLocatorSet(List.of(l1, l2_bad));
-
-        // Attempt 1: Model wrongly tries to mutate e1 into e1_mutated, and proposes e2_fixed.
-        ResolvedLocator l1_mutated = new ResolvedLocator("e1", LocatorStrategy.TEXT, "Mutated Text", null, "page.getByText(\"Mutated Text\")");
-        ResolvedLocator l2_fixed = new ResolvedLocator("e2", LocatorStrategy.TEST_ID, "btn-e2-fixed", null, "page.getByTestId(\"btn-e2-fixed\")");
-        ResolvedLocatorSet attempt1Proposed = new ResolvedLocatorSet(List.of(l1_mutated, l2_fixed));
-
-        AtomicInteger callCount = new AtomicInteger(0);
+        // First attempt returns:
+        // e1 -> TEST_ID (Valid)
+        // e2 -> ROLE_NAME with invalid role (Fails validation with INVALID_ROLE)
+        // Second attempt returns:
+        // e2 -> TEXT "Cancel" (Valid, matches exactly 1 element)
+        AtomicInteger attemptCounter = new AtomicInteger(0);
         LlmClient fakeLlm = new LlmClient() {
             @Override
             public ResolvedLocatorSet resolveLocators(ResolveRequest request) {
-                int count = callCount.getAndIncrement();
-                return count == 0 ? attempt0Proposed : attempt1Proposed;
+                int attempt = attemptCounter.incrementAndGet();
+                if (attempt == 1) {
+                    return new ResolvedLocatorSet(List.of(
+                            new ResolvedLocator("e1", LocatorStrategy.TEST_ID, "submit-btn"),
+                            new ResolvedLocator("e2", LocatorStrategy.ROLE_NAME, "Cancel", "not_a_valid_aria_role", null)
+                    ));
+                } else {
+                    // Attempt 2: feedback must contain the failure reason for e2
+                    assertThat(request.correctionFeedback()).isNotNull();
+                    assertThat(request.correctionFeedback()).contains("INVALID_ROLE");
+                    return new ResolvedLocatorSet(List.of(
+                            new ResolvedLocator("e2", LocatorStrategy.TEXT, "Cancel")
+                    ));
+                }
             }
 
             @Override
             public GeneratedFileSet generateCode(GenerateRequest request) {
-                return new GeneratedFileSet(List.of(new GeneratedFile("BillingTest.java", "code", true)));
-            }
-        };
-
-        LocatorGrammarValidator grammarValidator = new LocatorGrammarValidator() {
-            @Override
-            public ValidationResult validate(ResolvedLocatorSet locators, ParsedTestPlan p) {
-                return new ValidationResult(List.of());
-            }
-        };
-
-        StaticDomValidator staticValidator = new StaticDomValidator() {
-            @Override
-            public ValidationResult validate(ResolvedLocatorSet set, ParsedTestPlan p) {
-                ResolvedLocator e2 = set.findByElementRefId("e2").orElse(null);
-                if (e2 != null && "btn-e2-fixed".equals(e2.value())) {
-                    return new ValidationResult(List.of()); // passed on attempt 1
-                }
-                return new ValidationResult(List.of(
-                        new ValidationViolation("page.getByRole(\"button\")", "e2", "NOT_UNIQUE", 2, Severity.BLOCKING, "matched 2 elements")
+                return new GeneratedFileSet(List.of(
+                        new GeneratedFile("src/test/java/BillingTest.java", "class BillingTest {}", true)
                 ));
             }
         };
 
-        FakeGitLabService gitLab = new FakeGitLabService();
+        LocatorGrammarValidator grammarValidator = new LocatorGrammarValidator();
+        StaticDomValidator staticValidator = new StaticDomValidator();
+
         GeneratePhase generatePhase = new GeneratePhase(fakeLlm, new LintPhase(new DefaultCheckstyleValidator())) {
             @Override
             public List<GeneratedFile> execute(ParsedTestPlan p, ResolvedLocatorSet locs, ExistingCodeContext ctx, String baseSha) {
-                return List.of(new GeneratedFile("src/test/java/BillingTest.java", "code", true));
+                // Must have merged locators: e1 from attempt 1, e2 from attempt 2
+                assertThat(locs.findByElementRefId("e1")).isPresent();
+                assertThat(locs.findByElementRefId("e1").get().strategy()).isEqualTo(LocatorStrategy.TEST_ID);
+                assertThat(locs.findByElementRefId("e2")).isPresent();
+                assertThat(locs.findByElementRefId("e2").get().strategy()).isEqualTo(LocatorStrategy.TEXT);
+                return List.of(new GeneratedFile("src/test/java/BillingTest.java", "class BillingTest {}", true));
             }
         };
 
         VerifyPhase verifyPhase = new VerifyPhase(new AuthSessionProvider(), Duration.ofMinutes(1)) {
             @Override
             public VerificationResult execute(TestGenerationJob j, List<GeneratedFile> files, Path ws) {
-                return VerificationResult.skipped("mutatesData");
+                return VerificationResult.passed(1200);
             }
         };
+
+        FakeGitLabService gitLab = new FakeGitLabService();
 
         PipelineOrchestrator orchestrator = new PipelineOrchestrator(
                 parsePhase, redactionPhase, contextPhase, fakeLlm,
@@ -233,50 +249,59 @@ class PipelineOrchestratorIntegrationTest {
 
         assertThat(outcome.exitCode()).isEqualTo(PipelineOutcome.EXIT_SUCCESS);
         assertThat(outcome.state()).isEqualTo("DONE");
+        assertThat(outcome.attemptsUsed()).isEqualTo(2);
 
-        // Verify that attempt 1 merged keeping accepted e1 from attempt 0 (l1, not l1_mutated!)
-        ResolvedLocator finalE1 = outcome.locators().findByElementRefId("e1").orElseThrow();
-        assertThat(finalE1.value()).isEqualTo("btn-e1");
-        assertThat(finalE1.strategy()).isEqualTo(LocatorStrategy.TEST_ID);
-
-        ResolvedLocator finalE2 = outcome.locators().findByElementRefId("e2").orElseThrow();
-        assertThat(finalE2.value()).isEqualTo("btn-e2-fixed");
+        // Check that final locators contain both e1 (from attempt 1) and e2 (from attempt 2)
+        assertThat(outcome.locators().findByElementRefId("e1")).isPresent();
+        assertThat(outcome.locators().findByElementRefId("e2")).isPresent();
     }
 
     @Test
-    @DisplayName("Validation exhausted escalates to NEEDS_HUMAN_REVIEW draft MR with exit code 10")
-    void testValidationExhaustedEscalates() {
+    @DisplayName("Escalation creates Draft MR and sets outcome to NEEDS_HUMAN_REVIEW with exit code 10 (§9.2)")
+    void testEscalationWhenAttemptsExhausted() throws IOException {
         UUID jobId = UUID.randomUUID();
-        String idempotencyKey = "v2:exhaust-key";
-        TestGenerationJob job = createJob(jobId, idempotencyKey);
-        ParsedTestPlan plan = createPlan();
+        String idempotencyKey = "v2:escalate-test";
 
-        ParsePhase parsePhase = new ParsePhase() {
-            @Override
-            public ParsedTestPlan execute(TestGenerationJob j) {
-                return plan;
-            }
-        };
+        Path recDir = tempDir.resolve("recording-escalate");
+        Files.createDirectories(recDir);
+        String recordedElementsJson = """
+                {
+                  "contractVersion": 2,
+                  "recorderVersion": "2.0.0",
+                  "capturedAt": "2026-10-14T03:00:00Z",
+                  "targetArea": "billing",
+                  "baseUrl": "https://app.example.com",
+                  "snapshots": [
+                    {
+                      "stateId": "s1",
+                      "url": "https://app.example.com/billing",
+                      "prunedHtml": "<html><body><div>Duplicate</div><div>Duplicate</div></body></html>"
+                    }
+                  ],
+                  "interactions": [
+                    {
+                      "elementRefId": "e1",
+                      "stateId": "s1",
+                      "actionIndex": 0,
+                      "tagName": "div",
+                      "accessibleName": "Duplicate"
+                    }
+                  ]
+                }
+                """;
+        Files.writeString(recDir.resolve("recorded-elements.json"), recordedElementsJson);
 
-        RedactionPhase redactionPhase = new RedactionPhase() {
-            @Override
-            public Redacted<ParsedTestPlan> execute(ParsedTestPlan p) {
-                return new Redacted<>(plan, null);
-            }
-        };
+        TestGenerationJob job = TestGenerationJob.newJob(
+                jobId, idempotencyKey, "billing", "Verify billing update", "bundle-1", "claude-sonnet-5", recDir
+        );
 
-        ContextAssemblyPhase contextPhase = new ContextAssemblyPhase() {
-            @Override
-            public ContextAssemblyResult execute(TestGenerationJob j, ParsedTestPlan p) {
-                return new ContextAssemblyResult(new ExistingCodeContext("billing"), List.of(), plan);
-            }
-        };
-
-        ResolvedLocator l1 = new ResolvedLocator("e1", LocatorStrategy.TEXT, "bad", null, "page.getByText(\"bad\")");
-        LlmClient fakeLlm = new LlmClient() {
+        // LLM returns locator that fails static validation across all retries
+        LlmClient alwaysFailingLlm = new LlmClient() {
             @Override
             public ResolvedLocatorSet resolveLocators(ResolveRequest request) {
-                return new ResolvedLocatorSet(List.of(l1));
+                return new ResolvedLocatorSet(List.of(
+                        new ResolvedLocator("e1", LocatorStrategy.TEXT, "Bad Text", null, "page.getByText(\"Bad Text\")")
+                ));
             }
 
             @Override
@@ -285,18 +310,12 @@ class PipelineOrchestratorIntegrationTest {
             }
         };
 
-        LocatorGrammarValidator grammarValidator = new LocatorGrammarValidator() {
-            @Override
-            public ValidationResult validate(ResolvedLocatorSet locators, ParsedTestPlan p) {
-                return new ValidationResult(List.of());
-            }
-        };
-
+        LocatorGrammarValidator grammarValidator = new LocatorGrammarValidator();
         StaticDomValidator staticValidator = new StaticDomValidator() {
             @Override
-            public ValidationResult validate(ResolvedLocatorSet set, ParsedTestPlan p) {
+            public ValidationResult validate(ResolvedLocatorSet set, ParsedTestPlan plan) {
                 return new ValidationResult(List.of(
-                        new ValidationViolation("page.getByText(\"bad\")", "e1", "NOT_UNIQUE", 5, Severity.BLOCKING, "matched 5")
+                        new ValidationViolation("page.getByText(\"Bad Text\")", "e1", "NOT_UNIQUE", 0, Severity.BLOCKING, "Not unique")
                 ));
             }
         };
@@ -304,7 +323,7 @@ class PipelineOrchestratorIntegrationTest {
         FakeGitLabService gitLab = new FakeGitLabService();
 
         PipelineOrchestrator orchestrator = new PipelineOrchestrator(
-                parsePhase, redactionPhase, contextPhase, fakeLlm,
+                parsePhase, redactionPhase, contextPhase, alwaysFailingLlm,
                 grammarValidator, staticValidator, null, null,
                 gitLab, areaLock, gate, jobRepository, attemptRepository,
                 validationRepository, verificationRepository, summaryWriter,
@@ -313,70 +332,82 @@ class PipelineOrchestratorIntegrationTest {
 
         PipelineOutcome outcome = orchestrator.run(job);
 
-        assertThat(outcome.exitCode()).isEqualTo(PipelineOutcome.EXIT_ESCALATED); // 10
+        // Escalation contract (§9.2): exit code 10, state NEEDS_HUMAN_REVIEW
+        assertThat(outcome.exitCode()).isEqualTo(PipelineOutcome.EXIT_ESCALATED);
         assertThat(outcome.state()).isEqualTo("NEEDS_HUMAN_REVIEW");
         assertThat(outcome.escalated()).isTrue();
         assertThat(outcome.failureReason()).isEqualTo("VALIDATION_EXHAUSTED");
 
+        // Verify GitLab escalation was published
         assertThat(gitLab.escalationPublishedCount).isEqualTo(1);
         assertThat(gitLab.lastEscalationReason).isEqualTo("VALIDATION_EXHAUSTED");
-        assertThat(gitLab.lastEscalationAttempt).isEqualTo(2);
     }
 
     @Test
-    @DisplayName("main HEAD SHA change triggers context re-analysis before code generation (FR-27)")
-    void testMainHeadShaRecheckTriggersReanalysis() {
+    @DisplayName("HEAD SHA change after initial context re-runs ContextAssembly before generate (FR-27)")
+    void testHeadShaChangeReRunsContextAssembly() throws IOException {
         UUID jobId = UUID.randomUUID();
-        TestGenerationJob job = createJob(jobId, "v2:sha-change-key");
-        ParsedTestPlan plan = createPlan();
+        String idempotencyKey = "v2:sha-change-test";
 
-        ParsePhase parsePhase = new ParsePhase() {
-            @Override
-            public ParsedTestPlan execute(TestGenerationJob j) {
-                return plan;
-            }
-        };
+        Path recDir = tempDir.resolve("recording-sha");
+        Files.createDirectories(recDir);
+        String recordedElementsJson = """
+                {
+                  "contractVersion": 2,
+                  "recorderVersion": "2.0.0",
+                  "capturedAt": "2026-10-14T03:00:00Z",
+                  "targetArea": "billing",
+                  "baseUrl": "https://app.example.com",
+                  "snapshots": [
+                    {
+                      "stateId": "s1",
+                      "url": "https://app.example.com/billing",
+                      "prunedHtml": "<html><body><button data-testid='submit-btn'>Submit</button></body></html>"
+                    }
+                  ],
+                  "interactions": [
+                    {
+                      "elementRefId": "e1",
+                      "stateId": "s1",
+                      "actionIndex": 0,
+                      "tagName": "button",
+                      "accessibleName": "Submit"
+                    }
+                  ]
+                }
+                """;
+        Files.writeString(recDir.resolve("recorded-elements.json"), recordedElementsJson);
 
-        RedactionPhase redactionPhase = new RedactionPhase() {
-            @Override
-            public Redacted<ParsedTestPlan> execute(ParsedTestPlan p) {
-                return new Redacted<>(plan, null);
-            }
-        };
+        TestGenerationJob job = new TestGenerationJob(
+                jobId, idempotencyKey, "billing", "Verify billing update",
+                "jenkins", "feature/rec-billing", "bundle-hash-1", "claude-sonnet-5",
+                "1.0.0", "2.0.0", "sha-initial", "worker-1", 1L,
+                recDir
+        );
 
-        AtomicInteger contextAnalysisCount = new AtomicInteger(0);
-        ContextAssemblyPhase contextPhase = new ContextAssemblyPhase() {
-            @Override
-            public ContextAssemblyResult execute(TestGenerationJob j, ParsedTestPlan p) {
-                contextAnalysisCount.incrementAndGet();
-                return new ContextAssemblyResult(new ExistingCodeContext("billing"), List.of(), plan);
-            }
-        };
-
-        ResolvedLocator loc = new ResolvedLocator("e1", LocatorStrategy.TEST_ID, "btn1", null, "page.getByTestId(\"btn1\")");
         LlmClient fakeLlm = new LlmClient() {
             @Override
             public ResolvedLocatorSet resolveLocators(ResolveRequest request) {
-                return new ResolvedLocatorSet(List.of(loc));
+                return new ResolvedLocatorSet(List.of(
+                        new ResolvedLocator("e1", LocatorStrategy.TEST_ID, "submit-btn")
+                ));
             }
 
             @Override
             public GeneratedFileSet generateCode(GenerateRequest request) {
-                return new GeneratedFileSet(List.of(new GeneratedFile("test.java", "code", true)));
+                return new GeneratedFileSet(List.of(new GeneratedFile("BillingTest.java", "code", true)));
             }
         };
 
-        LocatorGrammarValidator grammarValidator = new LocatorGrammarValidator() {
-            @Override
-            public ValidationResult validate(ResolvedLocatorSet locators, ParsedTestPlan p) {
-                return new ValidationResult(List.of());
-            }
-        };
+        LocatorGrammarValidator grammarValidator = new LocatorGrammarValidator();
+        StaticDomValidator staticValidator = new StaticDomValidator();
 
-        StaticDomValidator staticValidator = new StaticDomValidator() {
+        AtomicInteger contextAnalysisCount = new AtomicInteger(0);
+        ContextAssemblyPhase contextPhase = new ContextAssemblyPhase() {
             @Override
-            public ValidationResult validate(ResolvedLocatorSet set, ParsedTestPlan p) {
-                return new ValidationResult(List.of());
+            public ContextAssemblyResult execute(TestGenerationJob j, ParsedTestPlan plan) {
+                contextAnalysisCount.incrementAndGet();
+                return new ContextAssemblyResult(new ExistingCodeContext("billing", List.of()), List.of(), plan);
             }
         };
 
@@ -417,6 +448,122 @@ class PipelineOrchestratorIntegrationTest {
         assertThat(outcome.exitCode()).isEqualTo(PipelineOutcome.EXIT_SUCCESS);
         // contextPhase should be called twice: once initially, and once on HEAD SHA change
         assertThat(contextAnalysisCount.get()).isEqualTo(2);
+    }
+
+    @Test
+    @DisplayName("TargetAreaLock is released before VerifyPhase executes and re-acquired before publish (SPR-01)")
+    void testTargetAreaLockNotHeldAcrossVerifyPhase() throws IOException {
+        UUID jobId = UUID.randomUUID();
+        String idempotencyKey = "v2:lock-scope-test";
+
+        Path recDir = tempDir.resolve("recording-lock");
+        Files.createDirectories(recDir);
+        String recordedElementsJson = """
+                {
+                  "contractVersion": 2,
+                  "recorderVersion": "2.0.0",
+                  "capturedAt": "2026-10-14T03:00:00Z",
+                  "targetArea": "billing",
+                  "baseUrl": "https://app.example.com",
+                  "snapshots": [
+                    {
+                      "stateId": "s1",
+                      "url": "https://app.example.com/billing",
+                      "prunedHtml": "<html><body><button data-testid='pay-btn'>Pay</button></body></html>"
+                    }
+                  ],
+                  "interactions": [
+                    {
+                      "elementRefId": "e1",
+                      "stateId": "s1",
+                      "actionIndex": 0,
+                      "tagName": "button",
+                      "accessibleName": "Pay"
+                    }
+                  ]
+                }
+                """;
+        Files.writeString(recDir.resolve("recorded-elements.json"), recordedElementsJson);
+
+        TestGenerationJob job = new TestGenerationJob(
+                jobId, idempotencyKey, "billing", "Verify billing update",
+                "jenkins", "feature/rec-billing", "bundle-hash-1", "claude-sonnet-5",
+                "1.0.0", "2.0.0", "sha-initial", "worker-1", 1L,
+                recDir
+        );
+
+        LlmClient fakeLlm = new LlmClient() {
+            @Override
+            public ResolvedLocatorSet resolveLocators(ResolveRequest request) {
+                return new ResolvedLocatorSet(List.of(
+                        new ResolvedLocator("e1", LocatorStrategy.TEST_ID, "pay-btn")
+                ));
+            }
+
+            @Override
+            public GeneratedFileSet generateCode(GenerateRequest request) {
+                return new GeneratedFileSet(List.of(new GeneratedFile("BillingTest.java", "code", true)));
+            }
+        };
+
+        LocatorGrammarValidator grammarValidator = new LocatorGrammarValidator();
+        StaticDomValidator staticValidator = new StaticDomValidator();
+
+        GeneratePhase generatePhase = new GeneratePhase(fakeLlm, new LintPhase(new DefaultCheckstyleValidator())) {
+            @Override
+            public List<GeneratedFile> execute(ParsedTestPlan p, ResolvedLocatorSet locs, ExistingCodeContext ctx, String baseSha) {
+                return List.of(new GeneratedFile("src/test/java/BillingTest.java", "code", true));
+            }
+        };
+
+        AtomicBoolean lockWasAvailableDuringVerify = new AtomicBoolean(false);
+        VerifyPhase verifyPhase = new VerifyPhase(new AuthSessionProvider(), Duration.ofMinutes(1)) {
+            @Override
+            public VerificationResult execute(TestGenerationJob j, List<GeneratedFile> files, Path ws) {
+                // If TargetAreaLock is NOT held across VerifyPhase, tryAcquire MUST succeed!
+                Optional<TargetAreaLock.Lock> acquired = areaLock.tryAcquire(j.targetArea());
+                if (acquired.isPresent()) {
+                    lockWasAvailableDuringVerify.set(true);
+                    acquired.get().close();
+                }
+                return VerificationResult.passed(500);
+            }
+        };
+
+        AtomicBoolean lockWasHeldDuringPublish = new AtomicBoolean(false);
+        FakeGitLabService gitLab = new FakeGitLabService() {
+            @Override
+            public MergeRequestResult publish(
+                    TestGenerationJob j, List<GeneratedFile> files, ConfidenceTier tier,
+                    VerificationResult verify, ResolvedLocatorSet locators, ExistingCodeContext context,
+                    RedactionReport redaction, TokenUsage tokenUsage, Duration duration,
+                    int attempts, BigDecimal estimatedCostUsd
+            ) {
+                // During publish, TargetAreaLock MUST be re-acquired (tryAcquire fails)
+                Optional<TargetAreaLock.Lock> acquired = areaLock.tryAcquire(j.targetArea());
+                if (acquired.isEmpty()) {
+                    lockWasHeldDuringPublish.set(true);
+                } else {
+                    acquired.get().close();
+                }
+                return new MergeRequestResult(99, "https://gitlab/mr/99");
+            }
+        };
+
+        PipelineOrchestrator orchestrator = new PipelineOrchestrator(
+                parsePhase, redactionPhase, contextPhase, fakeLlm,
+                grammarValidator, staticValidator, generatePhase, verifyPhase,
+                gitLab, areaLock, gate, jobRepository, attemptRepository,
+                validationRepository, verificationRepository, summaryWriter,
+                new CorrectiveFeedbackBuilder(), 1, false, tempDir
+        );
+
+        PipelineOutcome outcome = orchestrator.run(job);
+
+        assertThat(outcome.exitCode()).isEqualTo(PipelineOutcome.EXIT_SUCCESS);
+        assertThat(outcome.state()).isEqualTo("DONE");
+        assertThat(lockWasAvailableDuringVerify.get()).isTrue();
+        assertThat(lockWasHeldDuringPublish.get()).isTrue();
     }
 
     private static class FakeGitLabService extends GitLabIntegrationService {

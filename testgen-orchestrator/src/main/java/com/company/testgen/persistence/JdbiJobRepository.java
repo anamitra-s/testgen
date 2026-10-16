@@ -25,13 +25,13 @@ public class JdbiJobRepository implements JobRepository {
                 id, idempotency_key, target_area, test_description, requester,
                 recording_branch, state, confidence_tier, failure_reason,
                 prompt_bundle_hash, model_id, orchestrator_version, recorder_version,
-                base_commit_sha, lease_owner, lease_epoch, lease_expires_at,
+                base_commit_sha, lease_owner, lease_epoch, lease_expires_at, build_url,
                 redaction_report, mr_iid, mr_url, created_at, updated_at, completed_at
             ) VALUES (
                 :id, :idempotencyKey, :targetArea, :testDescription, :requester,
                 :recordingBranch, :state, :confidenceTier, :failureReason,
                 :promptBundleHash, :modelId, :orchestratorVersion, :recorderVersion,
-                :baseCommitSha, :leaseOwner, :leaseEpoch, :leaseExpiresAt,
+                :baseCommitSha, :leaseOwner, :leaseEpoch, :leaseExpiresAt, :buildUrl,
                 CAST(:redactionReport AS jsonb), :mrIid, :mrUrl, :createdAt, :updatedAt, :completedAt
             )
             """;
@@ -61,6 +61,7 @@ public class JdbiJobRepository implements JobRepository {
                 lease_owner = :leaseOwner,
                 lease_epoch = :leaseEpoch,
                 lease_expires_at = :leaseExpiresAt,
+                build_url = :buildUrl,
                 redaction_report = CAST(:redactionReport AS jsonb),
                 mr_iid = :mrIid,
                 mr_url = :mrUrl,
@@ -142,7 +143,7 @@ public class JdbiJobRepository implements JobRepository {
     private static final String DONE_WITHOUT_CONFIRMED_MR_SQL = """
             SELECT j.id FROM jobs j
              WHERE j.state = 'DONE'
-               AND NOT EXISTS (
+               AND NOT EXISTS (\
                    SELECT 1 FROM external_effects e
                     WHERE e.job_id = j.id
                       AND e.effect_type = 'MERGE_REQUEST'
@@ -419,6 +420,7 @@ public class JdbiJobRepository implements JobRepository {
                 .bind("leaseOwner", job.leaseOwner())
                 .bind("leaseEpoch", job.leaseEpoch())
                 .bind("leaseExpiresAt", job.leaseExpiresAt() != null ? Timestamp.from(job.leaseExpiresAt()) : null)
+                .bind("buildUrl", job.buildUrl())
                 .bind("redactionReport", job.redactionReport())
                 .bind("mrIid", job.mrIid())
                 .bind("mrUrl", job.mrUrl())

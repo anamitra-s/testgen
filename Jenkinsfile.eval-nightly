@@ -22,15 +22,16 @@ pipeline {
       steps {
         withCredentials([
           string(credentialsId: 'anthropic-api-key', variable: 'ANTHROPIC_API_KEY'),
+          string(credentialsId: 'testgen-db-url',    variable: 'TESTGEN_DB_URL'),
           usernamePassword(credentialsId: 'testgen-db', usernameVariable: 'TESTGEN_DB_USER',
                                                         passwordVariable: 'TESTGEN_DB_PASSWORD')
         ]) {
           sh '''
-            java -jar testgen-orchestrator/target/testgen-orchestrator.jar eval \\
-              --suite=golden \\
-              --repeats=3 \\
-              --concurrency=4 \\
-              --gate=blocking \\
+            java -jar testgen-orchestrator/target/testgen-orchestrator.jar eval \
+              --suite=golden \
+              --repeats=3 \
+              --concurrency=4 \
+              --gate=blocking \
               --report=eval-report.json
           '''
         }

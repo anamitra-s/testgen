@@ -61,6 +61,29 @@ class PushCommandTest {
     }
 
     @Test
+    void testPushCommandLocalMode(@TempDir Path temp) throws IOException {
+        String json = createValidRecordingJson();
+        String script = "await page.click('button'); // elementRefId: e1";
+
+        Files.writeString(temp.resolve("recorded-elements.json"), json);
+        Files.writeString(temp.resolve("recorded-test.js"), script);
+
+        StringWriter out = new StringWriter();
+        StringWriter err = new StringWriter();
+        CommandLine cmd = new CommandLine(new Main());
+        cmd.setOut(new PrintWriter(out));
+        cmd.setErr(new PrintWriter(err));
+
+        int exitCode = cmd.execute("push", temp.toString(), "--area=dashboard", "--desc=Local mode test", "--local", "--provider=gemini");
+
+        assertThat(exitCode).isEqualTo(0);
+        assertThat(out.toString()).contains("✓ Contract v2 valid");
+        assertThat(out.toString()).contains("✓ Idempotency key: v2:");
+        assertThat(out.toString()).contains("(local simulation)");
+        assertThat(out.toString()).contains("Local mode: Jenkins trigger skipped");
+    }
+
+    @Test
     void testPushCommandWithCustomGitPusherAndJenkinsTrigger(@TempDir Path temp) throws IOException {
         String json = createValidRecordingJson();
         String script = "await page.click('button'); // elementRefId: e1";

@@ -1,5 +1,6 @@
 package com.company.testgen.idempotency;
 
+import com.company.testgen.gitlab.MergeRequestResult;
 import com.company.testgen.model.JobRecord;
 import com.company.testgen.model.TestGenerationJob;
 import com.company.testgen.orchestrator.PipelineState;
@@ -97,7 +98,7 @@ class IdempotencySubsystemTest {
                 current.requester(), current.recordingBranch(), "RESOLVED", current.confidenceTier(),
                 current.failureReason(), current.promptBundleHash(), current.modelId(), current.orchestratorVersion(),
                 current.recorderVersion(), current.baseCommitSha(), current.leaseOwner(), current.leaseEpoch(),
-                Instant.now().minus(Duration.ofMinutes(5)), current.redactionReport(), current.mrIid(), current.mrUrl(),
+                Instant.now().minus(Duration.ofMinutes(5)), current.buildUrl(), current.redactionReport(), current.mrIid(), current.mrUrl(),
                 current.createdAt(), current.updatedAt(), null
         );
         repo.update(expired);
@@ -130,7 +131,7 @@ class IdempotencySubsystemTest {
                 current.requester(), current.recordingBranch(), "DONE", "VERIFIED",
                 null, current.promptBundleHash(), current.modelId(), current.orchestratorVersion(),
                 current.recorderVersion(), current.baseCommitSha(), current.leaseOwner(), current.leaseEpoch(),
-                current.leaseExpiresAt(), current.redactionReport(), 42, "https://gitlab.example.com/mr/42",
+                current.leaseExpiresAt(), current.buildUrl(), current.redactionReport(), 42, "https://gitlab.example.com/mr/42",
                 current.createdAt(), Instant.now(), Instant.now()
         ));
 
@@ -147,7 +148,7 @@ class IdempotencySubsystemTest {
                 currentReview.requester(), currentReview.recordingBranch(), "NEEDS_HUMAN_REVIEW", "STATIC_ONLY",
                 "VALIDATION_EXHAUSTED", currentReview.promptBundleHash(), currentReview.modelId(), currentReview.orchestratorVersion(),
                 currentReview.recorderVersion(), currentReview.baseCommitSha(), currentReview.leaseOwner(), currentReview.leaseEpoch(),
-                currentReview.leaseExpiresAt(), currentReview.redactionReport(), 43, "https://gitlab.example.com/mr/43",
+                currentReview.leaseExpiresAt(), currentReview.buildUrl(), currentReview.redactionReport(), 43, "https://gitlab.example.com/mr/43",
                 currentReview.createdAt(), Instant.now(), Instant.now()
         ));
 
@@ -173,6 +174,20 @@ class IdempotencySubsystemTest {
         assertThat(rerun.status()).isEqualTo(ClaimStatus.PROCEED);
         assertThat(rerun.jobId()).isEqualTo(first.jobId());
         assertThat(rerun.leaseEpoch()).isEqualTo(2L);
+    }
+
+    @Test
+    @DisplayName("IdempotencyGate: asserts key matches and throws IllegalArgumentException on mismatch")
+    void testIdempotencyGateAssertKeyMatches() {
+        // Matching key should succeed silently
+        IdempotencyGate.assertKeyMatches("v2:key-123", "v2:key-123");
+        IdempotencyGate.assertKeyMatches(null, "v2:key-123");
+        IdempotencyGate.assertKeyMatches("", "v2:key-123");
+
+        // Mismatched key should throw IllegalArgumentException
+        assertThatThrownBy(() -> IdempotencyGate.assertKeyMatches("v2:cli-key", "v2:derived-key"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("mismatch");
     }
 
     @Test
@@ -217,7 +232,7 @@ class IdempotencySubsystemTest {
                 current.requester(), current.recordingBranch(), current.state(), current.confidenceTier(),
                 current.failureReason(), current.promptBundleHash(), current.modelId(), current.orchestratorVersion(),
                 current.recorderVersion(), current.baseCommitSha(), current.leaseOwner(), current.leaseEpoch(),
-                Instant.now().minus(Duration.ofMinutes(1)), current.redactionReport(), current.mrIid(), current.mrUrl(),
+                Instant.now().minus(Duration.ofMinutes(1)), current.buildUrl(), current.redactionReport(), current.mrIid(), current.mrUrl(),
                 current.createdAt(), current.updatedAt(), null
         ));
 
@@ -268,7 +283,7 @@ class IdempotencySubsystemTest {
                     current.requester(), current.recordingBranch(), current.state(), current.confidenceTier(),
                     current.failureReason(), current.promptBundleHash(), current.modelId(), current.orchestratorVersion(),
                     current.recorderVersion(), current.baseCommitSha(), current.leaseOwner(), current.leaseEpoch(),
-                    Instant.now().minus(Duration.ofMinutes(1)), current.redactionReport(), current.mrIid(), current.mrUrl(),
+                    Instant.now().minus(Duration.ofMinutes(1)), current.buildUrl(), current.redactionReport(), current.mrIid(), current.mrUrl(),
                     current.createdAt(), current.updatedAt(), null
             ));
             Optional<Long> reclaimed = repo.reclaim(jobId, "worker-2", Instant.now().plus(Duration.ofMinutes(30)));
@@ -321,6 +336,75 @@ class IdempotencySubsystemTest {
 
         assertThat(second).isEqualTo("branch-ref-123");
         assertThat(actionInvocations.get()).isEqualTo(1); // Not called again!
+    }
+
+    @Test
+    @DisplayName("EffectExecutor: rejects mutation and throws LeaseLostException when worker lease epoch is stale")
+    void testEffectExecutorFencedAgainstLeaseEpoch() {
+        InMemoryEffectRepository effectRepo = new InMemoryEffectRepository();
+        InMemoryJobRepository jobRepo = new InMemoryJobRepository(effectRepo);
+        EffectExecutor executor = new EffectExecutor(effectRepo);
+
+        UUID jobId = UUID.randomUUID();
+        jobRepo.insert(JobRecord.newClaimed(
+                jobId, "key-fenced", "dashboard", "desc", "user", "branch",
+                "bundle", "model", "1.0.0", "1.0.0", "sha", "worker-1", 1L,
+                Instant.now().plus(Duration.ofMinutes(30))
+        ));
+
+        // Reclaim by worker-2: increments lease_epoch to 2
+        JobRecord current = jobRepo.findById(jobId).orElseThrow();
+        jobRepo.update(new JobRecord(
+                current.id(), current.idempotencyKey(), current.targetArea(), current.testDescription(),
+                current.requester(), current.recordingBranch(), current.state(), current.confidenceTier(),
+                current.failureReason(), current.promptBundleHash(), current.modelId(), current.orchestratorVersion(),
+                current.recorderVersion(), current.baseCommitSha(), current.leaseOwner(), current.leaseEpoch(),
+                Instant.now().minus(Duration.ofMinutes(1)), current.buildUrl(), current.redactionReport(), current.mrIid(), current.mrUrl(),
+                current.createdAt(), current.updatedAt(), null
+        ));
+        jobRepo.reclaim(jobId, "worker-2", Instant.now().plus(Duration.ofMinutes(30)));
+        assertThat(jobRepo.findById(jobId).get().leaseEpoch()).isEqualTo(2L);
+
+        // Zombie worker with epoch 1 must have effect reservation rejected with LeaseLostException (41)
+        assertThatThrownBy(() -> executor.exactlyOnce(
+                jobId, 1L, EffectType.BRANCH, "testgen/fenced-branch",
+                () -> "branch-sha",
+                Optional::empty
+        )).isInstanceOf(LeaseLostException.class)
+                .satisfies(e -> {
+                    LeaseLostException lle = (LeaseLostException) e;
+                    assertThat(lle.getExitCode()).isEqualTo(41);
+                    assertThat(lle.getJobId()).isEqualTo(jobId);
+                });
+    }
+
+    @Test
+    @DisplayName("EffectExecutor: cleanly rehydrates full typed MergeRequestResult when prior effect is CONFIRMED")
+    void testEffectExecutorRehydratesTypedMergeRequestResult() {
+        InMemoryEffectRepository effectRepo = new InMemoryEffectRepository();
+        EffectExecutor executor = new EffectExecutor(effectRepo);
+
+        UUID jobId = UUID.randomUUID();
+        String effectKey = "testgen/dashboard/" + jobId;
+
+        // Simulate confirmed MR effect with serialized MergeRequestResult JSON
+        effectRepo.reserve(jobId, EffectType.MERGE_REQUEST, effectKey, 1L);
+        effectRepo.confirm(jobId, 1L, EffectType.MERGE_REQUEST, effectKey, "{\"iid\":101,\"webUrl\":\"https://gitlab.example.com/mr/101\"}");
+
+        AtomicInteger actionCalled = new AtomicInteger(0);
+        MergeRequestResult result = executor.exactlyOnce(
+                jobId, 1L, EffectType.MERGE_REQUEST, effectKey,
+                () -> {
+                    actionCalled.incrementAndGet();
+                    return new MergeRequestResult(999, "https://should.not.be.called");
+                },
+                Optional::empty
+        );
+
+        assertThat(actionCalled.get()).isEqualTo(0);
+        assertThat(result).isNotNull();
+        assertThat(result.iid()).isEqualTo(101);
+        assertThat(result.webUrl()).isEqualTo("https://gitlab.example.com/mr/101");
     }
 
     @Test
@@ -410,7 +494,7 @@ class IdempotencySubsystemTest {
                 orphanJobId, "k1", "dashboard", "desc", "user", "branch",
                 "RESOLVED", null, null, "p", "m", "o", "r", "c",
                 "dead-worker", 1L, Instant.now().minus(Duration.ofMinutes(50)),
-                null, null, null, Instant.now().minus(Duration.ofHours(2)), Instant.now(), null
+                "http://jenkins/job/1", null, null, null, Instant.now().minus(Duration.ofHours(2)), Instant.now(), null
         ));
 
         // 2. Setup aged PENDING effect (> 30 min ago)
@@ -430,7 +514,7 @@ class IdempotencySubsystemTest {
                 violationJobId, "k2", "dashboard", "desc", "user", "branch",
                 "DONE", "VERIFIED", null, "p", "m", "o", "r", "c",
                 "worker", 1L, Instant.now().plus(Duration.ofMinutes(20)),
-                null, null, null, Instant.now().minus(Duration.ofMinutes(10)), Instant.now(), Instant.now()
+                "http://jenkins/job/2", null, null, null, Instant.now().minus(Duration.ofMinutes(10)), Instant.now(), Instant.now()
         ));
 
         // Reconciler with 0s duration to immediately consider everything eligible
@@ -459,6 +543,7 @@ class IdempotencySubsystemTest {
 
         // Verify alerts sent to Ops
         assertThat(alerts).anyMatch(a -> a.contains("orphaned in state RESOLVED"));
+        assertThat(alerts).anyMatch(a -> a.contains("http://jenkins/job/1"));
         assertThat(alerts).anyMatch(a -> a.contains("INVARIANT VIOLATION"));
     }
 }

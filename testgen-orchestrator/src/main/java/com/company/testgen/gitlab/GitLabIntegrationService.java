@@ -25,8 +25,12 @@ import org.gitlab4j.models.Constants;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
@@ -40,6 +44,7 @@ import java.util.Optional;
  * GitLab API integration service managing branches, commits, and merge requests (§6.15, §7.5).
  * All side-effecting operations are executed strictly through {@link EffectExecutor#exactlyOnce}.
  * Implements {@link GitLabLookup} for background reconciler sweeps (§7.7).
+ * Supports local file sink mode (§9.8, §9.9).
  */
 public class GitLabIntegrationService implements GitLabLookup {
 
@@ -48,16 +53,33 @@ public class GitLabIntegrationService implements GitLabLookup {
     private final GitLabApi api;
     private final Object projectId;
     private final EffectExecutor effects;
+    private final Path localOutputDir;
 
     public GitLabIntegrationService(GitLabApi api, Object projectId, EffectExecutor effects) {
         this.api = Objects.requireNonNull(api, "api cannot be null");
         this.projectId = Objects.requireNonNull(projectId, "projectId cannot be null");
         this.effects = Objects.requireNonNull(effects, "effects cannot be null");
+        this.localOutputDir = null;
     }
 
     public GitLabIntegrationService(String gitlabUrl, String apiToken, Object projectId, EffectExecutor effects) {
         this(new GitLabApi(Objects.requireNonNull(gitlabUrl, "gitlabUrl cannot be null"),
                 Objects.requireNonNull(apiToken, "apiToken cannot be null")), projectId, effects);
+    }
+
+    public GitLabIntegrationService(EffectExecutor effects, Path localOutputDir) {
+        this.api = null;
+        this.projectId = "local";
+        this.effects = Objects.requireNonNull(effects, "effects cannot be null");
+        this.localOutputDir = localOutputDir != null ? localOutputDir : Path.of("./local-output");
+    }
+
+    public GitLabIntegrationService(EffectExecutor effects) {
+        this(effects, Path.of("./local-output"));
+    }
+
+    public boolean isLocalMode() {
+        return localOutputDir != null;
     }
 
     /**
@@ -96,6 +118,36 @@ public class GitLabIntegrationService implements GitLabLookup {
         String branch = BranchNamer.forJob(job);
         log.info("Publishing job {} to branch '{}' in project '{}' with tier {}",
                 job.id(), branch, projectId, effectiveTier);
+
+        if (localOutputDir != null) {
+            // Local file sink: still execute exactly-once via external_effects ledger
+            effects.exactlyOnce(
+                    job,
+                    EffectType.BRANCH,
+                    branch,
+                    () -> createLocalBranch(job, branch),
+                    () -> checkLocalBranch(job, branch)
+            );
+
+            FaultInjector.checkpoint("after-branch-creation");
+
+            String contentKey = computeContentKey(files);
+            effects.exactlyOnce(
+                    job,
+                    EffectType.COMMIT,
+                    contentKey,
+                    () -> commitLocal(job, files, contentKey),
+                    () -> checkLocalCommit(job, contentKey)
+            );
+
+            return effects.exactlyOnce(
+                    job,
+                    EffectType.MERGE_REQUEST,
+                    branch,
+                    () -> createLocalMr(job, effectiveTier, verify, locators, context, redaction, tokenUsage, duration, attempts, estimatedCostUsd),
+                    () -> checkLocalMr(job)
+            );
+        }
 
         // 1. Exactly-once BRANCH creation
         effects.exactlyOnce(
@@ -159,6 +211,42 @@ public class GitLabIntegrationService implements GitLabLookup {
         log.info("Publishing ESCALATION draft MR for job {} on branch '{}' (reason={})",
                 job.id(), branch, reasonCode);
 
+        List<GeneratedFile> filesToCommit = (files != null && !files.isEmpty())
+                ? files
+                : List.of(new GeneratedFile(
+                        "src/test/resources/testgen/" + job.targetArea() + "-escalation.md",
+                        MergeRequestTemplate.renderEscalation(job, effectiveTier, reasonCode, accepted, validation, attemptsUsed),
+                        true));
+
+        if (localOutputDir != null) {
+            effects.exactlyOnce(
+                    job,
+                    EffectType.BRANCH,
+                    branch,
+                    () -> createLocalBranch(job, branch),
+                    () -> checkLocalBranch(job, branch)
+            );
+
+            FaultInjector.checkpoint("after-branch-creation");
+
+            String contentKey = computeContentKey(filesToCommit);
+            effects.exactlyOnce(
+                    job,
+                    EffectType.COMMIT,
+                    contentKey,
+                    () -> commitLocal(job, filesToCommit, contentKey),
+                    () -> checkLocalCommit(job, contentKey)
+            );
+
+            return effects.exactlyOnce(
+                    job,
+                    EffectType.MERGE_REQUEST,
+                    branch,
+                    () -> createLocalDraftMr(job, effectiveTier, reasonCode, accepted, validation, attemptsUsed),
+                    () -> checkLocalMr(job)
+            );
+        }
+
         // 1. Exactly-once BRANCH creation
         effects.exactlyOnce(
                 job,
@@ -179,14 +267,6 @@ public class GitLabIntegrationService implements GitLabLookup {
         );
 
         FaultInjector.checkpoint("after-branch-creation");
-
-        // 2. Commit files or draft escalation stub
-        List<GeneratedFile> filesToCommit = (files != null && !files.isEmpty())
-                ? files
-                : List.of(new GeneratedFile(
-                        "src/test/resources/testgen/" + job.targetArea() + "-escalation.md",
-                        MergeRequestTemplate.renderEscalation(job, effectiveTier, reasonCode, accepted, validation, attemptsUsed),
-                        true));
 
         String contentKey = computeContentKey(filesToCommit);
         effects.exactlyOnce(
@@ -211,6 +291,9 @@ public class GitLabIntegrationService implements GitLabLookup {
      * Checks if a branch exists in GitLab (§6.15).
      */
     public boolean branchExists(String branch) {
+        if (localOutputDir != null) {
+            return true;
+        }
         try {
             return api.getRepositoryApi().getOptionalBranch(projectId, branch).isPresent();
         } catch (Exception e) {
@@ -223,6 +306,9 @@ public class GitLabIntegrationService implements GitLabLookup {
      * Searches for an existing commit on the specified branch with the matching contentKey (§6.15).
      */
     public Optional<String> findCommitByTree(String branch, String contentKey) {
+        if (localOutputDir != null) {
+            return Optional.of("local-commit-" + (contentKey.length() > 8 ? contentKey.substring(0, 8) : contentKey));
+        }
         try {
             List<Commit> commits = api.getCommitsApi().getCommits(projectId, branch, null, null);
             if (commits != null) {
@@ -242,6 +328,10 @@ public class GitLabIntegrationService implements GitLabLookup {
      * Finds an open merge request matching the source branch (§6.15).
      */
     public Optional<MergeRequestResult> findOpenMrBySourceBranch(String branch) {
+        if (localOutputDir != null) {
+            Path mrFile = localOutputDir.resolve("MR-DESCRIPTION.md");
+            return Optional.of(new MergeRequestResult(1, "file://" + mrFile.toAbsolutePath().normalize().toString().replace('\\', '/')));
+        }
         try {
             List<MergeRequest> mrs = api.getMergeRequestApi().getMergeRequests(projectId, Constants.MergeRequestState.OPENED);
             if (mrs != null) {
@@ -262,6 +352,9 @@ public class GitLabIntegrationService implements GitLabLookup {
      * Queries the HEAD commit SHA of the specified branch (§6.13, FR-27).
      */
     public String headSha(String branch) {
+        if (localOutputDir != null) {
+            return "local-head-sha";
+        }
         try {
             Branch b = api.getRepositoryApi().getBranch(projectId, branch);
             if (b != null && b.getCommit() != null) {
@@ -284,6 +377,109 @@ public class GitLabIntegrationService implements GitLabLookup {
             case MERGE_REQUEST -> findOpenMrBySourceBranch(effectKey).map(MergeRequestResult::webUrl);
             case SLACK -> Optional.empty();
         };
+    }
+
+    private String createLocalBranch(TestGenerationJob job, String branch) {
+        Path jobDir = localOutputDir.resolve(job.id().toString());
+        try {
+            Files.createDirectories(jobDir);
+            log.info("Local mode: created branch directory '{}' for branch '{}'", jobDir, branch);
+            return branch;
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to create local branch directory " + jobDir, e);
+        }
+    }
+
+    private Optional<String> checkLocalBranch(TestGenerationJob job, String branch) {
+        Path jobDir = localOutputDir.resolve(job.id().toString());
+        return Files.isDirectory(jobDir) ? Optional.of(branch) : Optional.empty();
+    }
+
+    private String commitLocal(TestGenerationJob job, List<GeneratedFile> files, String contentKey) {
+        Path jobDir = localOutputDir.resolve(job.id().toString());
+        try {
+            Files.createDirectories(jobDir);
+            for (GeneratedFile f : files) {
+                if (f.path() != null && f.content() != null) {
+                    Path targetFile = jobDir.resolve(f.path());
+                    if (targetFile.getParent() != null) {
+                        Files.createDirectories(targetFile.getParent());
+                    }
+                    Files.writeString(targetFile, f.content(), StandardCharsets.UTF_8);
+                }
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to write local generated files into " + jobDir, e);
+        }
+        String commitSha = "local-commit-" + (contentKey.length() > 8 ? contentKey.substring(0, 8) : contentKey);
+        log.info("Local mode: wrote {} files to '{}' (commitSha={})", files.size(), jobDir, commitSha);
+        return commitSha;
+    }
+
+    private Optional<String> checkLocalCommit(TestGenerationJob job, String contentKey) {
+        Path jobDir = localOutputDir.resolve(job.id().toString());
+        return Files.isDirectory(jobDir)
+                ? Optional.of("local-commit-" + (contentKey.length() > 8 ? contentKey.substring(0, 8) : contentKey))
+                : Optional.empty();
+    }
+
+    private MergeRequestResult createLocalMr(
+            TestGenerationJob job,
+            ConfidenceTier tier,
+            VerificationResult verify,
+            ResolvedLocatorSet locators,
+            ExistingCodeContext context,
+            RedactionReport redaction,
+            TokenUsage tokenUsage,
+            Duration duration,
+            int attempts,
+            BigDecimal estimatedCostUsd
+    ) {
+        Path jobDir = localOutputDir.resolve(job.id().toString());
+        String desc = MergeRequestTemplate.render(
+                job, tier, verify, locators, context, redaction, tokenUsage, duration, attempts, estimatedCostUsd);
+        Path mrFile = jobDir.resolve("MR-DESCRIPTION.md");
+        try {
+            Files.createDirectories(jobDir);
+            Files.writeString(mrFile, desc, StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to write MR-DESCRIPTION.md to " + mrFile, e);
+        }
+        String webUrl = "file://" + mrFile.toAbsolutePath().normalize().toString().replace('\\', '/');
+        log.info("Local mode: rendered MR-DESCRIPTION.md to '{}'", mrFile);
+        return new MergeRequestResult(1, webUrl);
+    }
+
+    private MergeRequestResult createLocalDraftMr(
+            TestGenerationJob job,
+            ConfidenceTier tier,
+            String reasonCode,
+            ResolvedLocatorSet accepted,
+            ValidationResult validation,
+            int attemptsUsed
+    ) {
+        Path jobDir = localOutputDir.resolve(job.id().toString());
+        String desc = MergeRequestTemplate.renderEscalation(job, tier, reasonCode, accepted, validation, attemptsUsed);
+        Path mrFile = jobDir.resolve("MR-DESCRIPTION.md");
+        try {
+            Files.createDirectories(jobDir);
+            Files.writeString(mrFile, desc, StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to write MR-DESCRIPTION.md to " + mrFile, e);
+        }
+        String webUrl = "file://" + mrFile.toAbsolutePath().normalize().toString().replace('\\', '/');
+        log.info("Local mode: rendered Draft Escalation MR-DESCRIPTION.md to '{}'", mrFile);
+        return new MergeRequestResult(1, webUrl);
+    }
+
+    private Optional<MergeRequestResult> checkLocalMr(TestGenerationJob job) {
+        if (job == null) return Optional.empty();
+        Path mrFile = localOutputDir.resolve(job.id().toString()).resolve("MR-DESCRIPTION.md");
+        if (Files.exists(mrFile)) {
+            String webUrl = "file://" + mrFile.toAbsolutePath().normalize().toString().replace('\\', '/');
+            return Optional.of(new MergeRequestResult(1, webUrl));
+        }
+        return Optional.empty();
     }
 
     private String commit(String branch, TestGenerationJob job, List<GeneratedFile> files, String contentKey) {
@@ -344,7 +540,7 @@ public class GitLabIntegrationService implements GitLabLookup {
                     .withSquash(true)
                     .withLabels(List.of("auto-generated", "testgen", tier.name().toLowerCase()));
 
-            Long assigneeId = parseAssigneeId(job.requester());
+            Long assigneeId = resolveAssigneeId(job.requester());
             if (assigneeId != null) {
                 params.withAssigneeId(assigneeId);
             }
@@ -380,7 +576,7 @@ public class GitLabIntegrationService implements GitLabLookup {
                     .withSquash(true)
                     .withLabels(List.of("auto-generated", "testgen", "draft", "needs-review"));
 
-            Long assigneeId = parseAssigneeId(job.requester());
+            Long assigneeId = resolveAssigneeId(job.requester());
             if (assigneeId != null) {
                 params.withAssigneeId(assigneeId);
             }
@@ -423,11 +619,32 @@ public class GitLabIntegrationService implements GitLabLookup {
         }
     }
 
-    private Long parseAssigneeId(String requester) {
-        if (requester == null) return null;
+    private Long resolveAssigneeId(String requester) {
+        if (requester == null || requester.isBlank() || "jenkins".equalsIgnoreCase(requester.trim())) {
+            return null;
+        }
+        String trimmed = requester.trim();
         try {
-            return Long.parseLong(requester.trim());
-        } catch (NumberFormatException e) {
+            return Long.parseLong(trimmed);
+        } catch (NumberFormatException ignored) {
+            // Requester is a username string, resolve via GitLab UserApi
+        }
+
+        if (api == null) {
+            return null;
+        }
+
+        try {
+            Optional<org.gitlab4j.api.models.User> userOpt = api.getUserApi().getOptionalUser(trimmed);
+            if (userOpt.isPresent()) {
+                return userOpt.get().getId();
+            } else {
+                log.warn("GitLab user not found for requester '{}', opening MR unassigned", trimmed);
+                return null;
+            }
+        } catch (Exception e) {
+            log.warn("Failed to lookup GitLab user for requester '{}' ({}): opening MR unassigned",
+                    trimmed, e.getMessage());
             return null;
         }
     }
@@ -442,5 +659,9 @@ public class GitLabIntegrationService implements GitLabLookup {
 
     public EffectExecutor effects() {
         return effects;
+    }
+
+    public Path localOutputDir() {
+        return localOutputDir;
     }
 }

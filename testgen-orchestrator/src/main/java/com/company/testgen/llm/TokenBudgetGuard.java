@@ -2,6 +2,7 @@ package com.company.testgen.llm;
 
 import com.company.testgen.model.Phase;
 import com.company.testgen.model.TokenUsage;
+import com.company.testgen.persistence.CostEventRepository;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.SystemMessage;

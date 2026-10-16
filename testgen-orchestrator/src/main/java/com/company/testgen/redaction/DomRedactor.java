@@ -2,6 +2,7 @@ package com.company.testgen.redaction;
 
 import com.company.testgen.idempotency.IdempotencyKeyDeriver;
 import com.company.testgen.model.DomElementSnapshot;
+import com.company.testgen.model.ElementFingerprint;
 import com.company.testgen.model.PageSnapshot;
 import com.company.testgen.model.Redacted;
 import com.company.testgen.model.RedactionReport;
@@ -64,14 +65,25 @@ public class DomRedactor {
 
             List<DomElementSnapshot> els = raw.interactedElements() != null
                     ? raw.interactedElements().stream()
-                        .map(e -> new DomElementSnapshot(
-                                e.elementRefId(),
-                                e.tagName(),
-                                filterAttrs(e.attributes(), report),
-                                scrubText(e.textContent(), report),
-                                e.role(),
-                                scrubText(e.accessibleName(), report),
-                                e.fingerprint()))              // fingerprint is structural — no PII
+                        .map(e -> {
+                            ElementFingerprint rawFp = e.fingerprint();
+                            ElementFingerprint safeFp = rawFp == null ? null : new ElementFingerprint(
+                                    rawFp.tagName(),
+                                    rawFp.role(),
+                                    scrubText(rawFp.accessibleName(), report),
+                                    scrubText(rawFp.normalizedText(), report),
+                                    rawFp.ordinalAmongRolePeers(),
+                                    rawFp.domPathHash()
+                            );
+                            return new DomElementSnapshot(
+                                    e.elementRefId(),
+                                    e.tagName(),
+                                    filterAttrs(e.attributes(), report),
+                                    scrubText(e.textContent(), report),
+                                    e.role(),
+                                    scrubText(e.accessibleName(), report),
+                                    safeFp);
+                        })
                         .toList()
                     : List.of();
 

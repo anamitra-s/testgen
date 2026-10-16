@@ -56,6 +56,21 @@ class MainTest {
     }
 
     @Test
+    void testRunPreconditionFailureWhenIdempotencyKeyMismatches(@TempDir Path temp) throws IOException {
+        Path recFolder = temp.resolve("valid-rec");
+        Files.createDirectories(recFolder);
+        Files.writeString(recFolder.resolve("recorded-elements.json"), "[]");
+        Files.writeString(recFolder.resolve("recorded-test.js"), "// test script");
+
+        int exitCode = Main.run(
+                "run", recFolder.toString(),
+                "--area=dashboard", "--desc=test",
+                "--idempotency-key=v2:wrong-idempotency-key"
+        );
+        assertThat(exitCode).isEqualTo(PipelineOutcome.EXIT_PRECONDITION_FAILURE); // 30
+    }
+
+    @Test
     void testReconcileInMemoryReturnsSuccess() {
         int exitCode = Main.run("reconcile");
         assertThat(exitCode).isEqualTo(PipelineOutcome.EXIT_SUCCESS); // 0

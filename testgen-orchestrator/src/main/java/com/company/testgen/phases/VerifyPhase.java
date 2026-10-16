@@ -3,6 +3,7 @@ package com.company.testgen.phases;
 import com.company.testgen.model.GeneratedFile;
 import com.company.testgen.model.TestGenerationJob;
 import com.company.testgen.model.VerificationResult;
+import com.company.testgen.orchestrator.PipelineException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -11,6 +12,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -57,12 +60,52 @@ public class VerifyPhase {
             return VerificationResult.skipped("NO_SESSION");
         }
 
-        // Write files to workspace prior to test run
-        if (files != null && workspace != null) {
-            writeFilesToWorkspace(files, workspace);
-        }
+        Map<Path, byte[]> originalFiles = new LinkedHashMap<>();
+        List<Path> createdFiles = new ArrayList<>();
 
         try {
+            if (files != null && workspace != null) {
+                Path absWorkspace = workspace.toAbsolutePath().normalize();
+
+                // 1. Validate every GeneratedFile.path() to prevent path traversal
+                for (GeneratedFile file : files) {
+                    if (file == null || file.path() == null) {
+                        continue;
+                    }
+                    Path target = workspace.resolve(file.path()).normalize().toAbsolutePath();
+                    if (!target.startsWith(absWorkspace)) {
+                        throw new PipelineException("Path traversal detected in generated file path: " + file.path());
+                    }
+                }
+
+                // 2. Snapshot original file contents or track newly created files, then write content
+                for (GeneratedFile file : files) {
+                    if (file == null || file.path() == null || file.content() == null) {
+                        continue;
+                    }
+                    Path target = workspace.resolve(file.path()).normalize().toAbsolutePath();
+                    try {
+                        if (Files.exists(target)) {
+                            if (!originalFiles.containsKey(target)) {
+                                originalFiles.put(target, Files.readAllBytes(target));
+                            }
+                        } else {
+                            if (!createdFiles.contains(target)) {
+                                createdFiles.add(target);
+                            }
+                        }
+
+                        // 3. Create parent directories and write file.content() (UTF-8) to target
+                        if (target.getParent() != null) {
+                            Files.createDirectories(target.getParent());
+                        }
+                        Files.writeString(target, file.content(), StandardCharsets.UTF_8);
+                    } catch (IOException e) {
+                        throw new PipelineException("Failed to write generated file " + file.path() + " to workspace", e);
+                    }
+                }
+            }
+
             ProcessResult first = runTest(job, workspace, storageState.get());
             if (first.exitCode() == 0) {
                 log.info("L2 verification passed on first run in {}ms", first.durationMs());
@@ -96,7 +139,24 @@ public class VerifyPhase {
 
             log.warn("L2 verification confirmed test failure after retry. Tail:\n{}", first.tail(200));
             return VerificationResult.failed(first.tail(200));
+
         } finally {
+            // Restore workspace: delete newly created files, revert overwritten files
+            for (Path created : createdFiles) {
+                try {
+                    Files.deleteIfExists(created);
+                } catch (IOException e) {
+                    log.warn("Failed to delete created file {}: {}", created, e.getMessage());
+                }
+            }
+            for (Map.Entry<Path, byte[]> entry : originalFiles.entrySet()) {
+                try {
+                    Files.write(entry.getKey(), entry.getValue());
+                } catch (IOException e) {
+                    log.warn("Failed to restore original file {}: {}", entry.getKey(), e.getMessage());
+                }
+            }
+
             SecureDelete.of(storageState.get());   // token material never outlives the phase
         }
     }
@@ -126,21 +186,5 @@ public class VerifyPhase {
                 .env("TEST_ENV", testEnv)
                 .timeout(timeout)
                 .run();
-    }
-
-    private void writeFilesToWorkspace(List<GeneratedFile> files, Path workspace) {
-        for (GeneratedFile file : files) {
-            if (file.path() != null && file.content() != null) {
-                try {
-                    Path target = workspace.resolve(file.path());
-                    if (target.getParent() != null) {
-                        Files.createDirectories(target.getParent());
-                    }
-                    Files.writeString(target, file.content(), StandardCharsets.UTF_8);
-                } catch (IOException e) {
-                    log.warn("Failed to write file {} to workspace: {}", file.path(), e.getMessage());
-                }
-            }
-        }
     }
 }

@@ -9,8 +9,10 @@ import com.company.testgen.idempotency.LeaseLostException;
 import com.company.testgen.idempotency.ReconcileReport;
 import com.company.testgen.idempotency.ReconcilerJob;
 import com.company.testgen.llm.BudgetExceededException;
-import com.company.testgen.llm.InMemoryCostEventRepository;
+import com.company.testgen.persistence.InMemoryCostEventRepository;
 import com.company.testgen.llm.LangChain4jLlmClient;
+import com.company.testgen.llm.LlmClient;
+import com.company.testgen.llm.LocalMockLlmClient;
 import com.company.testgen.llm.PriceBook;
 import com.company.testgen.llm.PromptBundle;
 import com.company.testgen.llm.TokenBudgetGuard;
@@ -42,9 +44,9 @@ import com.company.testgen.persistence.JdbiValidationResultRepository;
 import com.company.testgen.persistence.JdbiVerificationRepository;
 import com.company.testgen.persistence.JobRepository;
 import com.company.testgen.persistence.TargetAreaLock;
-import com.company.testgen.phase.ContextAssemblyPhase;
-import com.company.testgen.phase.ParsePhase;
-import com.company.testgen.phase.RedactionPhase;
+import com.company.testgen.phases.ContextAssemblyPhase;
+import com.company.testgen.phases.ParsePhase;
+import com.company.testgen.phases.RedactionPhase;
 import com.company.testgen.phases.AuthSessionProvider;
 import com.company.testgen.phases.DefaultCheckstyleValidator;
 import com.company.testgen.phases.GeneratePhase;
@@ -69,6 +71,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.SQLException;
 import java.time.Duration;
+import java.util.HashMap;
+import java.util.Locale;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 
@@ -119,14 +124,44 @@ public class Main implements Callable<Integer> {
         System.exit(exitCode);
     }
 
+    public static LlmClient createLlmClient(PipelineProperties props, boolean local) {
+        String provider = props.llm().provider() != null ? props.llm().provider().trim().toLowerCase(Locale.ROOT) : "anthropic";
+        String apiKey = props.llm().apiKey() != null ? props.llm().apiKey().trim() : "";
+        boolean hasRealKey = !apiKey.isBlank() && !apiKey.equalsIgnoreCase("dummy-key") && !apiKey.equalsIgnoreCase("mock");
+
+        if ("mock".equals(provider) || "mock".equalsIgnoreCase(apiKey)) {
+            return new LocalMockLlmClient();
+        }
+
+        if (hasRealKey) {
+            TokenBudgetGuard budget = new TokenBudgetGuard(
+                    props.budget().maxTokensPerJob(),
+                    props.budget().maxUsdPerJob(),
+                    new InMemoryCostEventRepository(),
+                    new PriceBook()
+            );
+            PromptBundle prompts = PromptBundle.load();
+            return new LangChain4jLlmClient(props, budget, prompts);
+        }
+
+        if (local) {
+            return new LocalMockLlmClient();
+        }
+
+        return null;
+    }
+
     /**
      * {@code run} subcommand: executes full end-to-end test generation pipeline (§6.13, §9.2).
      */
     @Command(name = "run", description = "Run the test generation pipeline for a recording", mixinStandardHelpOptions = true)
     public static class RunCommand implements Callable<Integer> {
 
-        @Parameters(index = "0", description = "Recording folder containing recorded-elements.json")
+        @Parameters(index = "0", arity = "0..1", description = "Recording folder containing recorded-elements.json")
         private Path recordingFolder;
+
+        @Option(names = {"--recording-dir", "--recording-folder"}, description = "Recording folder containing recorded-elements.json")
+        private Path recordingDirOption;
 
         @Option(names = {"--area", "--target-area"}, required = true, description = "Target area (e.g. dashboard)")
         private String targetArea;
@@ -140,7 +175,7 @@ public class Main implements Callable<Integer> {
         @Option(names = {"--requester"}, defaultValue = "jenkins", description = "Requester identity")
         private String requester = "jenkins";
 
-        @Option(names = {"--branch"}, defaultValue = "scratch", description = "Recording branch")
+        @Option(names = {"--branch", "--recording-branch"}, defaultValue = "scratch", description = "Recording branch")
         private String branch = "scratch";
 
         @Option(names = {"--summary-file"}, defaultValue = "job-summary.json", description = "Path for job summary JSON")
@@ -173,27 +208,51 @@ public class Main implements Callable<Integer> {
         @Option(names = {"--verify-blocking"}, defaultValue = "false", description = "Whether L2 failure blocks MR")
         private boolean verifyBlocking = false;
 
+        @Option(names = {"--local"}, description = "Run in local mode without calling remote GitLab or requiring cloud LLM")
+        private boolean local = false;
+
+        @Option(names = {"--provider"}, description = "LLM provider override (anthropic, gemini, or mock)")
+        private String provider;
+
         @Override
         public Integer call() throws Exception {
-            if (recordingFolder == null || !Files.exists(recordingFolder)
-                    || !Files.exists(recordingFolder.resolve("recorded-elements.json"))) {
-                log.error("Precondition failed: valid recording folder does not exist: {}", recordingFolder);
+            Path folder = recordingFolder != null ? recordingFolder : recordingDirOption;
+            if (folder == null || !Files.exists(folder)
+                    || !Files.exists(folder.resolve("recorded-elements.json"))) {
+                log.error("Precondition failed: valid recording folder does not exist: {}", folder);
                 return PipelineOutcome.EXIT_PRECONDITION_FAILURE; // 30
             }
 
-            // Derive idempotency key if omitted
-            String effectiveKey = idempotencyKey;
-            if (effectiveKey == null || effectiveKey.isBlank()) {
-                IdempotencyKeyDeriver deriver = new IdempotencyKeyDeriver();
-                effectiveKey = deriver.derive(recordingFolder, targetArea, testDescription);
+            // Derive idempotency key from recording folder (§7.2)
+            IdempotencyKeyDeriver deriver = new IdempotencyKeyDeriver();
+            String derivedKey = deriver.derive(folder, targetArea, testDescription);
+
+            // Assert CLI parameter matches derived key (§7.2)
+            if (idempotencyKey != null && !idempotencyKey.isBlank()) {
+                if (!idempotencyKey.trim().equals(derivedKey)) {
+                    log.error("Precondition failed (30): CLI --idempotency-key '{}' does not match derived key '{}'",
+                            idempotencyKey.trim(), derivedKey);
+                    return PipelineOutcome.EXIT_PRECONDITION_FAILURE; // 30
+                }
+            }
+            String effectiveKey = derivedKey;
+
+            // Load properties & CLI overrides
+            Map<String, String> cliOverrides = new HashMap<>();
+            if (provider != null && !provider.isBlank()) {
+                cliOverrides.put("llm.provider", provider);
+            }
+            PipelineProperties props = PipelineProperties.load(cliOverrides);
+            if (provider != null && !provider.isBlank()) {
+                props = props.withProvider(provider);
             }
 
             UUID jobId = UUID.randomUUID();
             TestGenerationJob job = new TestGenerationJob(
                     jobId, effectiveKey, targetArea, testDescription,
-                    requester, branch, "prompt-v1", "claude-sonnet-5",
+                    requester, branch, "prompt-v1", props.llm().modelId(),
                     "1.0.0", "2.0.0", "main", "worker", 0L,
-                    recordingFolder
+                    folder
             );
 
             // Configure DB & Repositories
@@ -223,7 +282,9 @@ public class Main implements Callable<Integer> {
                 EffectExecutor effects = new EffectExecutor(effectRepo);
 
                 GitLabIntegrationService gitLab = null;
-                if (gitlabUrl != null && !gitlabUrl.isBlank() && gitlabToken != null && !gitlabToken.isBlank()) {
+                if (local) {
+                    gitLab = new GitLabIntegrationService(effects, Path.of("./local-output"));
+                } else if (gitlabUrl != null && !gitlabUrl.isBlank() && gitlabToken != null && !gitlabToken.isBlank()) {
                     gitLab = new GitLabIntegrationService(gitlabUrl, gitlabToken, gitlabProjectId, effects);
                 }
 
@@ -233,18 +294,7 @@ public class Main implements Callable<Integer> {
                 ContextAssemblyPhase contextPhase = new ContextAssemblyPhase();
 
                 // LLM and generation wiring
-                LangChain4jLlmClient llm = null;
-                PipelineProperties props = PipelineProperties.load();
-                if (props.llm().apiKey() != null && !props.llm().apiKey().isBlank() && !props.llm().apiKey().equals("dummy-key")) {
-                    TokenBudgetGuard budget = new TokenBudgetGuard(
-                            props.budget().maxTokensPerJob(),
-                            props.budget().maxUsdPerJob(),
-                            new InMemoryCostEventRepository(),
-                            new PriceBook()
-                    );
-                    PromptBundle prompts = PromptBundle.load();
-                    llm = new LangChain4jLlmClient(props, budget, prompts);
-                }
+                LlmClient llm = createLlmClient(props, local);
 
                 LintPhase lint = new LintPhase(new DefaultCheckstyleValidator());
                 GeneratePhase generate = llm != null ? new GeneratePhase(llm, lint) : null;
@@ -321,6 +371,12 @@ public class Main implements Callable<Integer> {
         @Option(names = {"--db-password"}, defaultValue = "${env:TESTGEN_DB_PASSWORD:-testgen}", description = "PostgreSQL password")
         private String dbPassword = "testgen";
 
+        @Option(names = {"--local"}, description = "Run in local mode")
+        private boolean local = false;
+
+        @Option(names = {"--provider"}, description = "LLM provider override (anthropic, gemini, or mock)")
+        private String provider;
+
         @Override
         public Integer call() throws Exception {
             Db db = null;
@@ -353,18 +409,16 @@ public class Main implements Callable<Integer> {
                     spec = new SuiteSpec(spec.name(), spec.cases(), spec.selection(), repeats, spec.filter());
                 }
 
-                PipelineProperties props = PipelineProperties.load();
-                LangChain4jLlmClient llm = null;
-                if (props.llm().apiKey() != null && !props.llm().apiKey().isBlank() && !props.llm().apiKey().equals("dummy-key")) {
-                    TokenBudgetGuard budget = new TokenBudgetGuard(
-                            props.budget().maxTokensPerJob(),
-                            props.budget().maxUsdPerJob(),
-                            new InMemoryCostEventRepository(),
-                            new PriceBook()
-                    );
-                    PromptBundle prompts = PromptBundle.load();
-                    llm = new LangChain4jLlmClient(props, budget, prompts);
+                Map<String, String> cliOverrides = new HashMap<>();
+                if (provider != null && !provider.isBlank()) {
+                    cliOverrides.put("llm.provider", provider);
                 }
+                PipelineProperties props = PipelineProperties.load(cliOverrides);
+                if (provider != null && !provider.isBlank()) {
+                    props = props.withProvider(provider);
+                }
+
+                LlmClient llm = createLlmClient(props, local);
 
                 RunConfig config = new RunConfig(
                         concurrency,

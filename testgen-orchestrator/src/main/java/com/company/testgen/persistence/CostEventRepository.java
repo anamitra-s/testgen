@@ -9,9 +9,14 @@ import java.util.UUID;
 
 /**
  * Persistence repository interface for LLM cost events and token usage audit (§6.10, §6.14).
- * Extends {@link com.company.testgen.llm.CostEventRepository} with transactional handle overloads.
  */
-public interface CostEventRepository extends com.company.testgen.llm.CostEventRepository {
+public interface CostEventRepository {
+
+    void insert(CostEvent event);
+
+    JobSpend spendFor(UUID jobId);
+
+    List<CostEvent> findByJobId(UUID jobId);
 
     void insert(Handle handle, CostEvent event);
 

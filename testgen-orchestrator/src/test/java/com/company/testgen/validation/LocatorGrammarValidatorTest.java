@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class LocatorGrammarValidatorTest {
@@ -104,6 +105,69 @@ class LocatorGrammarValidatorTest {
         assertThat(result.blocking()).anyMatch(v -> "UNKNOWN_ELEMENT_REF".equals(v.reasonCode()));
         assertThat(result.blocking()).anyMatch(v -> "EMPTY_VALUE".equals(v.reasonCode()));
         assertThat(result.blocking()).anyMatch(v -> "INVALID_ROLE".equals(v.reasonCode()));
+    }
+
+    @Test
+    @DisplayName("L0 returns blocking EMPTY_VALUE violation for null value without throwing NPE")
+    void testNullValueReturnsEmptyValueViolationWithoutNpe() {
+        ParsedTestPlan plan = new ParsedTestPlan(
+                "billing", "desc",
+                List.of(new RecordedAction(0, "click", "e1", null, "s1")),
+                List.of(), false, false
+        );
+
+        ResolvedLocatorSet set = ResolvedLocatorSet.of(
+                new ResolvedLocator("e1", LocatorStrategy.TEST_ID, null)
+        );
+
+        LocatorGrammarValidator validator = new LocatorGrammarValidator();
+        assertThatCode(() -> {
+            ValidationResult result = validator.validate(set, plan);
+            assertThat(result.passed()).isFalse();
+            assertThat(result.blocking()).anyMatch(v -> "EMPTY_VALUE".equals(v.reasonCode()));
+        }).doesNotThrowAnyException();
+    }
+
+    @Test
+    @DisplayName("L0 returns blocking INVALID_ROLE violation for ROLE_NAME with null role without throwing NPE")
+    void testNullRoleReturnsInvalidRoleViolationWithoutNpe() {
+        ParsedTestPlan plan = new ParsedTestPlan(
+                "billing", "desc",
+                List.of(new RecordedAction(0, "click", "e1", null, "s1")),
+                List.of(), false, false
+        );
+
+        ResolvedLocatorSet set = ResolvedLocatorSet.of(
+                new ResolvedLocator("e1", LocatorStrategy.ROLE_NAME, "Submit", null)
+        );
+
+        LocatorGrammarValidator validator = new LocatorGrammarValidator();
+        assertThatCode(() -> {
+            ValidationResult result = validator.validate(set, plan);
+            assertThat(result.passed()).isFalse();
+            assertThat(result.blocking()).anyMatch(v -> "INVALID_ROLE".equals(v.reasonCode()));
+        }).doesNotThrowAnyException();
+    }
+
+    @Test
+    @DisplayName("L0 returns blocking INVALID_STRATEGY violation for null strategy without throwing NPE")
+    void testNullStrategyReturnsInvalidStrategyViolationWithoutNpe() {
+        ParsedTestPlan plan = new ParsedTestPlan(
+                "billing", "desc",
+                List.of(new RecordedAction(0, "click", "e1", null, "s1")),
+                List.of(), false, false
+        );
+
+        ResolvedLocatorSet set = ResolvedLocatorSet.of(
+                new ResolvedLocator("e1", null, "submit-btn")
+        );
+
+        LocatorGrammarValidator validator = new LocatorGrammarValidator();
+        assertThatCode(() -> {
+            ValidationResult result = validator.validate(set, plan);
+            assertThat(result.passed()).isFalse();
+            assertThat(result.blocking()).anyMatch(v -> "INVALID_STRATEGY".equals(v.reasonCode()));
+        }).doesNotThrowAnyException();
     }
 
     @Test

@@ -1,4 +1,4 @@
-package com.company.testgen.phase;
+package com.company.testgen.phases;
 
 import com.company.testgen.dom.DomPruner;
 import com.company.testgen.model.ExistingCodeContext;

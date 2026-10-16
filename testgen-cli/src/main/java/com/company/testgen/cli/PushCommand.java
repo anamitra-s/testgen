@@ -20,6 +20,7 @@ import java.util.concurrent.Callable;
  * The {@code push} subcommand (§3.2, §4.1, §6.3, §7.2, FR-01, FR-02, FR-03).
  * Validates recording contract v2, computes idempotency key, pushes scratch branch via Git over HTTPS,
  * and triggers Jenkins parameterized build via REST.
+ * Supports --local and --provider flags for local development (§9.8, §9.9).
  */
 @Command(
         name = "push",
@@ -98,6 +99,18 @@ public class PushCommand implements Callable<Integer> {
     )
     private boolean dryRun = false;
 
+    @Option(
+            names = {"--local"},
+            description = "Local development mode: skips remote push and Jenkins trigger"
+    )
+    private boolean local = false;
+
+    @Option(
+            names = {"--provider"},
+            description = "LLM provider override (anthropic, gemini, or mock)"
+    )
+    private String provider;
+
     private GitPusher gitPusher;
     private JenkinsTrigger jenkinsTrigger;
 
@@ -122,7 +135,8 @@ public class PushCommand implements Callable<Integer> {
     public Integer call() {
         try {
             // 1. Ingestion contract & freshness validation (§4.1, FR-02, FR-03)
-            ContractValidator validator = new ContractValidator(Duration.ofHours(maxAgeHours));
+            Duration maxAge = local ? Duration.ofDays(36500) : Duration.ofHours(maxAgeHours);
+            ContractValidator validator = new ContractValidator(maxAge);
             ValidationReport report = validator.validate(recordingFolder);
 
             spec.commandLine().getOut().printf("✓ Contract v%d valid (%d actions, %d interacted elements, page HTML captured)%n",
@@ -137,7 +151,10 @@ public class PushCommand implements Callable<Integer> {
             // 3. Push scratch branch & trigger Jenkins build (§3.2, §4.1)
             String scratchBranch = "testgen-scratch/" + UUID.randomUUID();
 
-            if (!dryRun) {
+            if (local) {
+                spec.commandLine().getOut().println("✓ Pushed " + scratchBranch + " (local simulation)");
+                spec.commandLine().getOut().println("✓ Local mode: Jenkins trigger skipped. Ready for testgen-orchestrator.");
+            } else if (!dryRun) {
                 if (gitUrl != null && !gitUrl.isBlank()) {
                     gitPusher.push(recordingFolder, scratchBranch, gitUrl);
                     spec.commandLine().getOut().println("✓ Pushed " + scratchBranch);

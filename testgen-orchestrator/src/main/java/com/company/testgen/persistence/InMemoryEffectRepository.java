@@ -1,6 +1,8 @@
 package com.company.testgen.persistence;
 
 import com.company.testgen.idempotency.EffectType;
+import com.company.testgen.idempotency.LeaseLostException;
+import com.company.testgen.model.JobRecord;
 import org.jdbi.v3.core.Handle;
 
 import java.time.Duration;
@@ -14,12 +16,33 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * In-memory test double for {@link EffectRepository}.
+ * In-memory test double for {@link EffectRepository} with lease epoch fencing support (§7.4).
  */
 public class InMemoryEffectRepository implements EffectRepository {
 
     private final AtomicLong sequence = new AtomicLong(1L);
     private final Map<String, EffectRecord> storage = new ConcurrentHashMap<>();
+    private JobRepository jobRepository;
+
+    public InMemoryEffectRepository() {
+    }
+
+    public InMemoryEffectRepository(JobRepository jobRepository) {
+        this.jobRepository = jobRepository;
+    }
+
+    public void setJobRepository(JobRepository jobRepository) {
+        this.jobRepository = jobRepository;
+    }
+
+    private void checkLeaseEpoch(UUID jobId, long leaseEpoch) {
+        if (jobRepository != null && jobId != null) {
+            Optional<JobRecord> job = jobRepository.findById(jobId);
+            if (job.isPresent() && job.get().leaseEpoch() != leaseEpoch) {
+                throw new LeaseLostException(jobId, leaseEpoch);
+            }
+        }
+    }
 
     private String key(UUID jobId, EffectType type, String effectKey) {
         return jobId + "::" + type + "::" + effectKey;
@@ -42,6 +65,7 @@ public class InMemoryEffectRepository implements EffectRepository {
 
     @Override
     public void reserve(Handle handle, UUID jobId, EffectType type, String effectKey, long leaseEpoch) {
+        checkLeaseEpoch(jobId, leaseEpoch);
         storage.computeIfAbsent(key(jobId, type, effectKey), k -> new EffectRecord(
                 sequence.getAndIncrement(),
                 jobId,
@@ -57,12 +81,38 @@ public class InMemoryEffectRepository implements EffectRepository {
     }
 
     @Override
+    public void confirm(UUID jobId, long leaseEpoch, EffectType type, String effectKey, String externalId) {
+        confirm(null, jobId, leaseEpoch, type, effectKey, externalId);
+    }
+
+    @Override
+    public void confirm(Handle handle, UUID jobId, long leaseEpoch, EffectType type, String effectKey, String externalId) {
+        checkLeaseEpoch(jobId, leaseEpoch);
+        storage.computeIfPresent(key(jobId, type, effectKey), (k, r) -> new EffectRecord(
+                r.id(),
+                r.jobId(),
+                r.effectType(),
+                r.effectKey(),
+                EffectStatus.CONFIRMED,
+                externalId,
+                leaseEpoch,
+                r.attempts(),
+                r.createdAt(),
+                Instant.now()
+        ));
+    }
+
+    @Override
     public void confirm(UUID jobId, EffectType type, String effectKey, String externalId) {
         confirm(null, jobId, type, effectKey, externalId);
     }
 
     @Override
     public void confirm(Handle handle, UUID jobId, EffectType type, String effectKey, String externalId) {
+        EffectRecord existing = storage.get(key(jobId, type, effectKey));
+        if (existing != null) {
+            checkLeaseEpoch(jobId, existing.leaseEpoch());
+        }
         storage.computeIfPresent(key(jobId, type, effectKey), (k, r) -> new EffectRecord(
                 r.id(),
                 r.jobId(),
@@ -79,12 +129,45 @@ public class InMemoryEffectRepository implements EffectRepository {
 
     @Override
     public void confirm(EffectRecord record, String externalId) {
-        confirm(record.jobId(), record.effectType(), record.effectKey(), externalId);
+        confirm(null, record, externalId);
     }
 
     @Override
     public void confirm(Handle handle, EffectRecord record, String externalId) {
-        confirm(handle, record.jobId(), record.effectType(), record.effectKey(), externalId);
+        storage.computeIfPresent(key(record.jobId(), record.effectType(), record.effectKey()), (k, r) -> new EffectRecord(
+                r.id(),
+                r.jobId(),
+                r.effectType(),
+                r.effectKey(),
+                EffectStatus.CONFIRMED,
+                externalId,
+                r.leaseEpoch(),
+                r.attempts(),
+                r.createdAt(),
+                Instant.now()
+        ));
+    }
+
+    @Override
+    public void incrementAttempts(UUID jobId, long leaseEpoch, EffectType type, String effectKey) {
+        incrementAttempts(null, jobId, leaseEpoch, type, effectKey);
+    }
+
+    @Override
+    public void incrementAttempts(Handle handle, UUID jobId, long leaseEpoch, EffectType type, String effectKey) {
+        checkLeaseEpoch(jobId, leaseEpoch);
+        storage.computeIfPresent(key(jobId, type, effectKey), (k, r) -> new EffectRecord(
+                r.id(),
+                r.jobId(),
+                r.effectType(),
+                r.effectKey(),
+                r.status(),
+                r.externalId(),
+                leaseEpoch,
+                r.attempts() + 1,
+                r.createdAt(),
+                r.confirmedAt()
+        ));
     }
 
     @Override
@@ -94,6 +177,10 @@ public class InMemoryEffectRepository implements EffectRepository {
 
     @Override
     public void incrementAttempts(Handle handle, UUID jobId, EffectType type, String effectKey) {
+        EffectRecord existing = storage.get(key(jobId, type, effectKey));
+        if (existing != null) {
+            checkLeaseEpoch(jobId, existing.leaseEpoch());
+        }
         storage.computeIfPresent(key(jobId, type, effectKey), (k, r) -> new EffectRecord(
                 r.id(),
                 r.jobId(),
@@ -109,12 +196,38 @@ public class InMemoryEffectRepository implements EffectRepository {
     }
 
     @Override
+    public void abandon(UUID jobId, long leaseEpoch, EffectType type, String effectKey, String reason) {
+        abandon(null, jobId, leaseEpoch, type, effectKey, reason);
+    }
+
+    @Override
+    public void abandon(Handle handle, UUID jobId, long leaseEpoch, EffectType type, String effectKey, String reason) {
+        checkLeaseEpoch(jobId, leaseEpoch);
+        storage.computeIfPresent(key(jobId, type, effectKey), (k, r) -> new EffectRecord(
+                r.id(),
+                r.jobId(),
+                r.effectType(),
+                r.effectKey(),
+                EffectStatus.ABANDONED,
+                r.externalId(),
+                leaseEpoch,
+                r.attempts(),
+                r.createdAt(),
+                r.confirmedAt()
+        ));
+    }
+
+    @Override
     public void abandon(UUID jobId, EffectType type, String effectKey, String reason) {
         abandon(null, jobId, type, effectKey, reason);
     }
 
     @Override
     public void abandon(Handle handle, UUID jobId, EffectType type, String effectKey, String reason) {
+        EffectRecord existing = storage.get(key(jobId, type, effectKey));
+        if (existing != null) {
+            checkLeaseEpoch(jobId, existing.leaseEpoch());
+        }
         storage.computeIfPresent(key(jobId, type, effectKey), (k, r) -> new EffectRecord(
                 r.id(),
                 r.jobId(),
@@ -131,12 +244,23 @@ public class InMemoryEffectRepository implements EffectRepository {
 
     @Override
     public void abandon(EffectRecord record, String reason) {
-        abandon(record.jobId(), record.effectType(), record.effectKey(), reason);
+        abandon(null, record, reason);
     }
 
     @Override
     public void abandon(Handle handle, EffectRecord record, String reason) {
-        abandon(handle, record.jobId(), record.effectType(), record.effectKey(), reason);
+        storage.computeIfPresent(key(record.jobId(), record.effectType(), record.effectKey()), (k, r) -> new EffectRecord(
+                r.id(),
+                r.jobId(),
+                r.effectType(),
+                r.effectKey(),
+                EffectStatus.ABANDONED,
+                r.externalId(),
+                r.leaseEpoch(),
+                r.attempts(),
+                r.createdAt(),
+                r.confirmedAt()
+        ));
     }
 
     @Override

@@ -7,14 +7,17 @@ import org.slf4j.LoggerFactory;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Statistical Evaluation Gate implementing non-inferiority testing and guardrails (§8.4, §8.7).
  * - Non-inferiority bootstrap test (MARGIN = 0.05, ALPHA = 0.05) over cases
+ * - Small sample size warning & diagnostic when suite has < 10 active cases
  * - 90-day long-horizon ratchet drift check (0.10 margin)
  * - 20% cost guardrail
  * - Unstable case detection (variance >= 0.25 on > 10% of cases)
@@ -65,6 +68,17 @@ public class EvalGate {
 
         EvalRun base = baseline.get();
         List<String> failures = new ArrayList<>();
+        List<String> diagnostics = new ArrayList<>();
+
+        // Diagnostic: guard statistical bootstrap against small sample sizes (< 10 cases) (§8.4)
+        if (candidate.caseCount() < Bootstrap.SMALL_SAMPLE_THRESHOLD) {
+            String underpoweredMsg = String.format(
+                    "Small sample size warning: suite has %d active cases (< 10). 95%% confidence interval on proportions is statistically underpowered.",
+                    candidate.caseCount()
+            );
+            log.warn(underpoweredMsg);
+            diagnostics.add(underpoweredMsg);
+        }
 
         // 1. Bootstrap difference in proportions for primary gating metrics (resampling CASES)
         for (Metric m : List.of(Metric.FIRST_ATTEMPT_PASS_RATE, Metric.LOCATOR_EXACT_MATCH_RATE)) {
@@ -107,11 +121,13 @@ public class EvalGate {
         }
 
         // 4. Cost guardrail (allow 20% drift before blocking) (§8.4)
-        if (base.meanCostUsd().compareTo(BigDecimal.ZERO) > 0) {
-            BigDecimal costLimit = base.meanCostUsd().multiply(BigDecimal.valueOf(COST_TOLERANCE));
-            if (candidate.meanCostUsd().compareTo(costLimit) > 0) {
-                double pctDelta = candidate.meanCostUsd().subtract(base.meanCostUsd())
-                        .divide(base.meanCostUsd(), 4, RoundingMode.HALF_UP)
+        BigDecimal baseCost = base.meanCostUsd() != null ? base.meanCostUsd() : BigDecimal.ZERO;
+        BigDecimal candidateCost = candidate.meanCostUsd() != null ? candidate.meanCostUsd() : BigDecimal.ZERO;
+        if (baseCost.compareTo(BigDecimal.ZERO) > 0) {
+            BigDecimal costLimit = baseCost.multiply(BigDecimal.valueOf(COST_TOLERANCE));
+            if (candidateCost.compareTo(costLimit) > 0) {
+                double pctDelta = candidateCost.subtract(baseCost)
+                        .divide(baseCost, 4, RoundingMode.HALF_UP)
                         .multiply(BigDecimal.valueOf(100))
                         .doubleValue();
                 failures.add(String.format("cost/case up %.0f%% vs baseline (guardrail max 20%%)", pctDelta));
@@ -126,8 +142,8 @@ public class EvalGate {
         }
 
         return failures.isEmpty()
-                ? GateOutcome.pass(candidate, base)
-                : GateOutcome.fail(failures, candidate, base);
+                ? GateOutcome.pass(candidate, base, diagnostics)
+                : GateOutcome.fail(failures, candidate, base, diagnostics);
     }
 
     /**
@@ -159,21 +175,37 @@ public class EvalGate {
             return List.of();
         }
 
-        // Identify cases present in active corpus that failed in all 3 runs
-        Map<String, Integer> consecutiveFails = new LinkedHashMap<>();
+        // Identify cases that failed across each of the 3 consecutive nightly runs
+        Set<String> failingInAll = null;
         for (EvalRun run : last3) {
+            Set<String> failedInRun = new HashSet<>();
             for (EvalCaseResultRecord cr : run.caseResults()) {
-                if (!cr.firstAttemptPass() || cr.escalated()) {
-                    consecutiveFails.put(cr.caseId(), consecutiveFails.getOrDefault(cr.caseId(), 0) + 1);
+                Optional<EvalCase> ec = corpus.findCase(cr.caseId());
+                boolean expectedEscalate = ec.map(EvalCase::expectedToEscalate).orElse(false);
+                if (expectedEscalate) {
+                    if (!cr.escalated()) {
+                        failedInRun.add(cr.caseId());
+                    }
+                } else {
+                    if (!cr.firstAttemptPass() || cr.escalated()) {
+                        failedInRun.add(cr.caseId());
+                    }
                 }
+            }
+            if (failingInAll == null) {
+                failingInAll = new HashSet<>(failedInRun);
+            } else {
+                failingInAll.retainAll(failedInRun);
             }
         }
 
-        for (EvalCase c : corpus.cases()) {
-            if (c.isActive() && consecutiveFails.getOrDefault(c.caseId(), 0) >= 3) {
-                log.warn("Auto-quarantining case {} due to 3 consecutive nightly failures", c.caseId());
-                corpus.quarantineCase(c.caseId());
-                quarantined.add(c.caseId());
+        if (failingInAll != null) {
+            for (EvalCase c : corpus.cases()) {
+                if (c.isActive() && failingInAll.contains(c.caseId())) {
+                    log.warn("Auto-quarantining case {} due to 3 consecutive nightly failures", c.caseId());
+                    corpus.quarantineCase(c.caseId());
+                    quarantined.add(c.caseId());
+                }
             }
         }
 
@@ -190,5 +222,9 @@ public class EvalGate {
 
     public double longHorizonMargin() {
         return longHorizonMargin;
+    }
+
+    public int resamples() {
+        return resamples;
     }
 }

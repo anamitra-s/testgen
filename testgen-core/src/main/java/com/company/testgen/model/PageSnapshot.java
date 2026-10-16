@@ -34,10 +34,11 @@ public record PageSnapshot(
         if (interactedElements == null || refId == null) {
             return null;
         }
-        return interactedElements.stream()
-                .filter(el -> refId.equals(el.elementRefId()))
-                .map(DomElementSnapshot::fingerprint)
-                .findFirst()
-                .orElse(null);
+        for (DomElementSnapshot el : interactedElements) {
+            if (el != null && refId.equals(el.elementRefId())) {
+                return el.fingerprint();
+            }
+        }
+        return null;
     }
 }

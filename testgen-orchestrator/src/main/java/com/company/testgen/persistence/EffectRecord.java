@@ -23,8 +23,4 @@ public record EffectRecord(
     public EffectRecord(UUID jobId, EffectType effectType, String effectKey, long leaseEpoch) {
         this(null, jobId, effectType, effectKey, EffectStatus.PENDING, null, leaseEpoch, 0, Instant.now(), null);
     }
-
-    public EffectRecord(UUID jobId, com.company.testgen.persistence.EffectType effectType, String effectKey, long leaseEpoch) {
-        this(null, jobId, effectType.toIdempotencyType(), effectKey, EffectStatus.PENDING, null, leaseEpoch, 0, Instant.now(), null);
-    }
 }

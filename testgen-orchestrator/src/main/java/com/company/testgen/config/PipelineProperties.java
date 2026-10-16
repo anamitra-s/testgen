@@ -107,7 +107,12 @@ public record PipelineProperties(
             return new BudgetProperties(
                     250_000,
                     new BigDecimal("2.50"),
-                    Map.of("claude-sonnet-5", ModelPrice.DEFAULT_SONNET)
+                    Map.of(
+                            "claude-sonnet-5", ModelPrice.DEFAULT_SONNET,
+                            "gemini-2.5-flash", new ModelPrice(new BigDecimal("0.15"), new BigDecimal("0.60"), BigDecimal.ZERO, BigDecimal.ZERO),
+                            "gemini-2.5-pro", new ModelPrice(new BigDecimal("1.25"), new BigDecimal("5.00"), BigDecimal.ZERO, BigDecimal.ZERO),
+                            "mock-model", new ModelPrice(BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO)
+                    )
             );
         }
     }
@@ -238,6 +243,29 @@ public record PipelineProperties(
         }
     }
 
+    public PipelineProperties withProvider(String overrideProvider) {
+        if (overrideProvider == null || overrideProvider.isBlank()) {
+            return this;
+        }
+        LlmProperties newLlm = new LlmProperties(
+                overrideProvider.trim(),
+                llm.modelId(),
+                llm.candidateModelId(),
+                llm.canaryPercent(),
+                llm.apiKey(),
+                llm.maxOutputTokens(),
+                llm.temperature(),
+                llm.timeout(),
+                llm.transportRetries(),
+                llm.transportBackoffBase(),
+                llm.cacheSystemMessages(),
+                llm.cacheTools()
+        );
+        return new PipelineProperties(
+                ingestion, newLlm, budget, retry, dom, redaction, validation, gitlab, db, idempotency, eval, retention, session
+        );
+    }
+
     public static PipelineProperties defaults(String apiKey) {
         return new PipelineProperties(
                 IngestionProperties.defaults(),
@@ -295,7 +323,8 @@ public record PipelineProperties(
         String modelId = override("llm.model-id", getVal(llmMap, "model-id", "claude-sonnet-5"), effectiveEnv, effectiveCli);
         String candidateModelId = override("llm.candidate-model-id", getVal(llmMap, "candidate-model-id", ""), effectiveEnv, effectiveCli);
         int canaryPercent = Integer.parseInt(override("llm.canary-percent", getVal(llmMap, "canary-percent", "0"), effectiveEnv, effectiveCli));
-        String apiKey = resolveSecret("llm.api-key", "ANTHROPIC_API_KEY", getVal(llmMap, "api-key", null), effectiveEnv, effectiveCli);
+        String primaryApiKeyVar = "gemini".equalsIgnoreCase(provider) ? "GEMINI_API_KEY" : "ANTHROPIC_API_KEY";
+        String apiKey = resolveSecret("llm.api-key", primaryApiKeyVar, getVal(llmMap, "api-key", "${GEMINI_API_KEY:${ANTHROPIC_API_KEY:}}"), effectiveEnv, effectiveCli);
         int maxOutputTokens = Integer.parseInt(override("llm.max-output-tokens", getVal(llmMap, "max-output-tokens", "8192"), effectiveEnv, effectiveCli));
         double temperature = Double.parseDouble(override("llm.temperature", getVal(llmMap, "temperature", "0.0"), effectiveEnv, effectiveCli));
         Duration timeout = parseDuration(override("llm.timeout", getVal(llmMap, "timeout", "120s"), effectiveEnv, effectiveCli));
@@ -411,7 +440,7 @@ public record PipelineProperties(
     }
 
     private static String override(String propertyPath, String defaultValue, Map<String, String> env, Map<String, String> cli) {
-        // 1. CLI flag (e.g., --llm.model-id or model-id)
+        // 1. CLI flag (e.g., --llm.provider or --provider)
         String cliVal = getCliValue(propertyPath, cli);
         if (cliVal != null && !cliVal.isBlank()) {
             return cliVal.trim();
@@ -424,15 +453,25 @@ public record PipelineProperties(
             return envVal.trim();
         }
 
-        // 3. Interpolate ${VAR} in defaultValue if present
+        // Also check alias (e.g. TESTGEN_LLM_MODEL for TESTGEN_LLM_MODEL_ID, TESTGEN_LLM_PROVIDER for llm.provider)
+        if ("llm.model-id".equals(propertyPath) && env.containsKey("TESTGEN_LLM_MODEL")) {
+            String val = env.get("TESTGEN_LLM_MODEL");
+            if (val != null && !val.isBlank()) {
+                return val.trim();
+            }
+        }
+        if ("llm.provider".equals(propertyPath) && env.containsKey("TESTGEN_LLM_PROVIDER")) {
+            String val = env.get("TESTGEN_LLM_PROVIDER");
+            if (val != null && !val.isBlank()) {
+                return val.trim();
+            }
+        }
+
+        // 3. Interpolate ${VAR:default} in defaultValue if present
         if (defaultValue != null) {
-            Matcher matcher = ENV_PATTERN.matcher(defaultValue);
-            if (matcher.matches()) {
-                String varName = matcher.group(1);
-                String resolved = env.get(varName);
-                if (resolved != null && !resolved.isBlank()) {
-                    return resolved.trim();
-                }
+            String resolved = resolvePlaceholders(defaultValue, env);
+            if (resolved != null && !resolved.isBlank()) {
+                return resolved.trim();
             }
         }
 
@@ -463,21 +502,43 @@ public record PipelineProperties(
             }
         }
 
-        // 4. Interpolate from yaml default ${VAR}
+        // 4. Interpolate from yaml default ${VAR:default}
         if (defaultYamlValue != null) {
-            Matcher matcher = ENV_PATTERN.matcher(defaultYamlValue);
-            if (matcher.matches()) {
-                String varName = matcher.group(1);
-                String resolved = env.get(varName);
-                if (resolved != null && !resolved.isBlank()) {
-                    return resolved.trim();
-                }
-                return null;
+            String resolved = resolvePlaceholders(defaultYamlValue, env);
+            if (resolved != null && !resolved.isBlank()) {
+                return resolved.trim();
             }
-            return defaultYamlValue;
+            return null;
         }
 
         return null;
+    }
+
+    public static String resolvePlaceholders(String text, Map<String, String> env) {
+        if (text == null || text.isBlank()) {
+            return text;
+        }
+        int start = text.lastIndexOf("${");
+        if (start == -1) {
+            return text;
+        }
+        int end = text.indexOf("}", start);
+        if (end == -1) {
+            return text;
+        }
+
+        String inner = text.substring(start + 2, end);
+        int colonIdx = inner.indexOf(':');
+        String varName = colonIdx >= 0 ? inner.substring(0, colonIdx) : inner;
+        String defaultVal = colonIdx >= 0 ? inner.substring(colonIdx + 1) : "";
+
+        String val = env != null ? env.get(varName) : null;
+        if (val == null || val.isBlank()) {
+            val = defaultVal;
+        }
+
+        String replaced = text.substring(0, start) + val + text.substring(end + 1);
+        return resolvePlaceholders(replaced, env);
     }
 
     private static String getCliValue(String propertyPath, Map<String, String> cli) {
@@ -524,20 +585,20 @@ public record PipelineProperties(
     @SuppressWarnings("unchecked")
     private static Map<String, ModelPrice> parsePriceBook(Object raw) {
         if (!(raw instanceof Map<?, ?> map)) {
-            return Map.of("claude-sonnet-5", ModelPrice.DEFAULT_SONNET);
+            return BudgetProperties.defaults().priceBook();
         }
-        Map<String, ModelPrice> book = new HashMap<>();
+        Map<String, ModelPrice> book = new HashMap<>(BudgetProperties.defaults().priceBook());
         for (Map.Entry<?, ?> entry : map.entrySet()) {
             if (entry.getKey() != null && entry.getValue() instanceof Map<?, ?> priceMap) {
                 String model = entry.getKey().toString();
-                BigDecimal in = toBigDecimal(priceMap.get("input"), "3.00");
-                BigDecimal out = toBigDecimal(priceMap.get("output"), "15.00");
-                BigDecimal cw = toBigDecimal(priceMap.get("cache-write"), "3.75");
-                BigDecimal cr = toBigDecimal(priceMap.get("cache-read"), "0.30");
+                BigDecimal in = toBigDecimal(priceMap.get("input"), "0.0");
+                BigDecimal out = toBigDecimal(priceMap.get("output"), "0.0");
+                BigDecimal cw = toBigDecimal(priceMap.get("cache-write"), "0.0");
+                BigDecimal cr = toBigDecimal(priceMap.get("cache-read"), "0.0");
                 book.put(model, new ModelPrice(in, out, cw, cr));
             }
         }
-        return book.isEmpty() ? Map.of("claude-sonnet-5", ModelPrice.DEFAULT_SONNET) : Collections.unmodifiableMap(book);
+        return book.isEmpty() ? BudgetProperties.defaults().priceBook() : Collections.unmodifiableMap(book);
     }
 
     private static BigDecimal toBigDecimal(Object val, String defaultVal) {

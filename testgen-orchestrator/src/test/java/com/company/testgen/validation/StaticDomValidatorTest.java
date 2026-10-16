@@ -19,6 +19,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 
 class StaticDomValidatorTest {
 
@@ -166,5 +167,48 @@ class StaticDomValidatorTest {
 
         assertThat(result.passed()).isTrue();
         assertThat(result.advisory()).anyMatch(v -> "DEGRADED_NO_HTML".equals(v.reasonCode()));
+    }
+
+    @Test
+    @DisplayName("Passing malformed locators into StaticDomValidator alongside LocatorGrammarValidator does not throw an exception")
+    void testMalformedLocatorsAlongsideGrammarValidator() {
+        String html = "<html><body><button data-testid=\"submit-btn\">Submit</button></body></html>";
+        PageSnapshot snap = new PageSnapshot("s1", "https://app.example.com", html, List.of(), Instant.now(), false);
+
+        ParsedTestPlan plan = new ParsedTestPlan(
+                "billing", "desc",
+                List.of(
+                        new RecordedAction(0, "click", "e1", null, "s1"),
+                        new RecordedAction(1, "click", "e2", null, "s1"),
+                        new RecordedAction(2, "click", "e3", null, "s1")
+                ),
+                List.of(snap), false, false
+        );
+
+        ResolvedLocatorSet malformedSet = ResolvedLocatorSet.of(
+                new ResolvedLocator("e1", LocatorStrategy.TEST_ID, null),
+                new ResolvedLocator("e2", LocatorStrategy.ROLE_NAME, "Submit", null),
+                new ResolvedLocator("e3", null, "btn")
+        );
+
+        LocatorGrammarValidator grammarValidator = new LocatorGrammarValidator();
+        StaticDomValidator staticValidator = new StaticDomValidator();
+
+        assertThatCode(() -> {
+            ValidationResult l0 = grammarValidator.validate(malformedSet, plan);
+            ValidationResult l1 = staticValidator.validate(malformedSet, plan);
+            ValidationResult merged = ValidationResult.merge(l0, l1);
+
+            assertThat(l0.passed()).isFalse();
+            assertThat(l0.blocking()).anyMatch(v -> "EMPTY_VALUE".equals(v.reasonCode()));
+            assertThat(l0.blocking()).anyMatch(v -> "INVALID_ROLE".equals(v.reasonCode()));
+            assertThat(l0.blocking()).anyMatch(v -> "INVALID_STRATEGY".equals(v.reasonCode()));
+
+            assertThat(l1.blocking()).isEmpty();
+            assertThat(merged.passed()).isFalse();
+            assertThat(merged.blocking()).anyMatch(v -> "EMPTY_VALUE".equals(v.reasonCode()));
+            assertThat(merged.blocking()).anyMatch(v -> "INVALID_ROLE".equals(v.reasonCode()));
+            assertThat(merged.blocking()).anyMatch(v -> "INVALID_STRATEGY".equals(v.reasonCode()));
+        }).doesNotThrowAnyException();
     }
 }

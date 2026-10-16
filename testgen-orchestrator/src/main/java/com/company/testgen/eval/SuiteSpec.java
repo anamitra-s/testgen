@@ -1,10 +1,7 @@
 package com.company.testgen.eval;
 
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
-
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -14,9 +11,8 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Specification for an evaluation suite defined in {@code evals/suites.yaml} (§8.2).
+ * Specification for an evaluation suite defined in {@code suites.yaml} (§8.2).
  */
-@JsonIgnoreProperties(ignoreUnknown = true)
 public record SuiteSpec(
         String name,
         String cases,
@@ -24,7 +20,8 @@ public record SuiteSpec(
         int repeats,
         String filter
 ) {
-    private static final Pattern DIFFICULTY_PATTERN = Pattern.compile("difficulty\\s*==\\s*['\"]?(\\w+)['\"]?", Pattern.CASE_INSENSITIVE);
+
+    private static final Pattern DIFFICULTY_PATTERN = Pattern.compile("difficulty\\s*==\\s*([a-zA-Z]+)", Pattern.CASE_INSENSITIVE);
 
     public SuiteSpec {
         name = name != null ? name : "default";
@@ -75,6 +72,7 @@ public record SuiteSpec(
 
     /**
      * Filters and selects cases according to this suite's selection criteria (§8.2).
+     * Clamps selection to available active matching cases without throwing exceptions.
      */
     public List<EvalCase> filterCases(List<EvalCase> allCases) {
         if (allCases == null || allCases.isEmpty()) {
@@ -83,6 +81,7 @@ public record SuiteSpec(
 
         List<EvalCase> matched = allCases.stream()
                 .filter(this::matches)
+                .filter(EvalCase::isActive)
                 .toList();
 
         if (cases == null || "all".equalsIgnoreCase(cases)) {
@@ -96,18 +95,27 @@ public record SuiteSpec(
             return matched;
         }
 
-        if (matched.size() <= targetCount) {
+        if (targetCount <= 0) {
+            return List.of();
+        }
+
+        int clampedCount = Math.min(targetCount, matched.size());
+        if (matched.size() <= clampedCount) {
             return matched;
         }
 
         if ("stratified".equalsIgnoreCase(selection)) {
-            return stratifiedSample(matched, targetCount);
+            return stratifiedSample(matched, clampedCount);
         }
 
-        return matched.subList(0, targetCount);
+        return matched.subList(0, clampedCount);
     }
 
     private List<EvalCase> stratifiedSample(List<EvalCase> input, int count) {
+        if (input == null || input.isEmpty() || count <= 0) {
+            return List.of();
+        }
+        int effectiveCount = Math.min(count, input.size());
         // Stratify by (difficulty, targetArea)
         Map<String, List<EvalCase>> strata = new LinkedHashMap<>();
         for (EvalCase c : input) {
@@ -115,12 +123,12 @@ public record SuiteSpec(
             strata.computeIfAbsent(key, k -> new ArrayList<>()).add(c);
         }
 
-        List<EvalCase> result = new ArrayList<>(count);
+        List<EvalCase> result = new ArrayList<>(effectiveCount);
         boolean added = true;
-        while (result.size() < count && added) {
+        while (result.size() < effectiveCount && added) {
             added = false;
             for (List<EvalCase> stratum : strata.values()) {
-                if (!stratum.isEmpty() && result.size() < count) {
+                if (!stratum.isEmpty() && result.size() < effectiveCount) {
                     result.add(stratum.remove(0));
                     added = true;
                 }

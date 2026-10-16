@@ -50,6 +50,22 @@ public class IdempotencyGate {
         this(null, jobs, null, null);
     }
 
+    /**
+     * Asserts that the client-provided key matches the content-derived key (§7.2).
+     *
+     * @param cliKey client-provided idempotency key (may be null/blank if omitted)
+     * @param derivedKey content-derived idempotency key
+     * @throws IllegalArgumentException if cliKey is provided and does not match derivedKey
+     */
+    public static void assertKeyMatches(String cliKey, String derivedKey) {
+        if (cliKey != null && !cliKey.isBlank()) {
+            if (!cliKey.trim().equals(derivedKey)) {
+                throw new IllegalArgumentException(
+                        "Idempotency key mismatch: CLI provided '" + cliKey.trim() + "' but derived '" + derivedKey + "'");
+            }
+        }
+    }
+
     public Claim claim(String idempotencyKey, JobSpec spec) {
         Objects.requireNonNull(idempotencyKey, "idempotencyKey cannot be null");
         Objects.requireNonNull(spec, "spec cannot be null");
@@ -88,6 +104,7 @@ public class IdempotencyGate {
             UUID id = UUID.randomUUID();
             Instant expiresAt = Instant.now().plus(leaseTtl);
             long epoch = 1L;
+            String buildUrl = System.getenv("BUILD_URL");
             JobRecord newJob = JobRecord.newClaimed(
                     id,
                     idempotencyKey,
@@ -102,7 +119,8 @@ public class IdempotencyGate {
                     spec.baseCommitSha(),
                     leaseOwner,
                     epoch,
-                    expiresAt
+                    expiresAt,
+                    buildUrl
             );
 
             try {

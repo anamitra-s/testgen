@@ -28,10 +28,16 @@ public class InMemoryJobRepository implements JobRepository {
 
     public InMemoryJobRepository(EffectRepository effectRepository) {
         this.effectRepository = effectRepository;
+        if (effectRepository instanceof InMemoryEffectRepository inMem) {
+            inMem.setJobRepository(this);
+        }
     }
 
     public void setEffectRepository(EffectRepository effectRepository) {
         this.effectRepository = effectRepository;
+        if (effectRepository instanceof InMemoryEffectRepository inMem) {
+            inMem.setJobRepository(this);
+        }
     }
 
     @Override
@@ -148,7 +154,7 @@ public class InMemoryJobRepository implements JobRepository {
                     current.requester(), current.recordingBranch(), current.state(), current.confidenceTier(),
                     current.failureReason(), current.promptBundleHash(), current.modelId(), current.orchestratorVersion(),
                     current.recorderVersion(), current.baseCommitSha(), owner, newEpoch, expiresAt,
-                    current.redactionReport(), current.mrIid(), current.mrUrl(), current.createdAt(), now, current.completedAt()
+                    current.buildUrl(), current.redactionReport(), current.mrIid(), current.mrUrl(), current.createdAt(), now, current.completedAt()
             );
             store.put(id, updated);
             return Optional.of(newEpoch);
@@ -170,7 +176,7 @@ public class InMemoryJobRepository implements JobRepository {
                 current.requester(), current.recordingBranch(), state, current.confidenceTier(),
                 current.failureReason(), current.promptBundleHash(), current.modelId(), current.orchestratorVersion(),
                 current.recorderVersion(), current.baseCommitSha(), current.leaseOwner(), current.leaseEpoch(),
-                expiresAt, current.redactionReport(), current.mrIid(), current.mrUrl(), current.createdAt(),
+                expiresAt, current.buildUrl(), current.redactionReport(), current.mrIid(), current.mrUrl(), current.createdAt(),
                 Instant.now(), current.completedAt()
         );
         store.put(id, updated);
@@ -191,7 +197,7 @@ public class InMemoryJobRepository implements JobRepository {
                 current.requester(), current.recordingBranch(), current.state(), current.confidenceTier(),
                 current.failureReason(), current.promptBundleHash(), current.modelId(), current.orchestratorVersion(),
                 current.recorderVersion(), current.baseCommitSha(), current.leaseOwner(), current.leaseEpoch(),
-                expiresAt, current.redactionReport(), current.mrIid(), current.mrUrl(), current.createdAt(),
+                expiresAt, current.buildUrl(), current.redactionReport(), current.mrIid(), current.mrUrl(), current.createdAt(),
                 Instant.now(), current.completedAt()
         );
         store.put(id, updated);
@@ -213,7 +219,7 @@ public class InMemoryJobRepository implements JobRepository {
                 current.requester(), current.recordingBranch(), "DONE", confidenceTier,
                 null, current.promptBundleHash(), current.modelId(), current.orchestratorVersion(),
                 current.recorderVersion(), current.baseCommitSha(), current.leaseOwner(), current.leaseEpoch(),
-                current.leaseExpiresAt(), current.redactionReport(), mrIid, mrUrl, current.createdAt(),
+                current.leaseExpiresAt(), current.buildUrl(), current.redactionReport(), mrIid, mrUrl, current.createdAt(),
                 now, now
         );
         store.put(id, updated);
@@ -235,7 +241,7 @@ public class InMemoryJobRepository implements JobRepository {
                 current.requester(), current.recordingBranch(), "FAILED", current.confidenceTier(),
                 failureReason, current.promptBundleHash(), current.modelId(), current.orchestratorVersion(),
                 current.recorderVersion(), current.baseCommitSha(), current.leaseOwner(), current.leaseEpoch(),
-                current.leaseExpiresAt(), current.redactionReport(), current.mrIid(), current.mrUrl(),
+                current.leaseExpiresAt(), current.buildUrl(), current.redactionReport(), current.mrIid(), current.mrUrl(),
                 current.createdAt(), now, now
         );
         store.put(id, updated);
@@ -295,7 +301,7 @@ public class InMemoryJobRepository implements JobRepository {
                 current.requester(), current.recordingBranch(), "FAILED", current.confidenceTier(),
                 failureReason, current.promptBundleHash(), current.modelId(), current.orchestratorVersion(),
                 current.recorderVersion(), current.baseCommitSha(), current.leaseOwner(), current.leaseEpoch(),
-                current.leaseExpiresAt(), current.redactionReport(), current.mrIid(), current.mrUrl(),
+                current.leaseExpiresAt(), current.buildUrl(), current.redactionReport(), current.mrIid(), current.mrUrl(),
                 current.createdAt(), now, now
         );
         store.put(id, updated);
@@ -323,7 +329,7 @@ public class InMemoryJobRepository implements JobRepository {
                 current.requester(), current.recordingBranch(), current.state(), current.confidenceTier(),
                 current.failureReason(), current.promptBundleHash(), current.modelId(), current.orchestratorVersion(),
                 current.recorderVersion(), current.baseCommitSha(), current.leaseOwner(), current.leaseEpoch(),
-                current.leaseExpiresAt(), reportJson, current.mrIid(), current.mrUrl(),
+                current.leaseExpiresAt(), current.buildUrl(), reportJson, current.mrIid(), current.mrUrl(),
                 current.createdAt(), Instant.now(), current.completedAt()
         );
         store.put(id, updated);

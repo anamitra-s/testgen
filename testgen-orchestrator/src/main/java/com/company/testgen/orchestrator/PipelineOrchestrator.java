@@ -12,7 +12,6 @@ import com.company.testgen.idempotency.LeaseHeartbeat;
 import com.company.testgen.idempotency.LeaseLostException;
 import com.company.testgen.llm.BudgetExceededException;
 import com.company.testgen.llm.LlmClient;
-import com.company.testgen.llm.ResolveRequest;
 import com.company.testgen.model.ConfidenceTier;
 import com.company.testgen.model.ExistingCodeContext;
 import com.company.testgen.model.GeneratedFile;
@@ -36,11 +35,12 @@ import com.company.testgen.persistence.RetryAttemptRepository;
 import com.company.testgen.persistence.TargetAreaLock;
 import com.company.testgen.persistence.ValidationResultRepository;
 import com.company.testgen.persistence.VerificationRepository;
-import com.company.testgen.phase.ContextAssemblyPhase;
-import com.company.testgen.phase.ParsePhase;
-import com.company.testgen.phase.RedactionPhase;
+import com.company.testgen.phases.ContextAssemblyPhase;
 import com.company.testgen.phases.EscalationRequired;
 import com.company.testgen.phases.GeneratePhase;
+import com.company.testgen.phases.ParsePhase;
+import com.company.testgen.phases.RedactionPhase;
+import com.company.testgen.phases.ResolvePhase;
 import com.company.testgen.phases.VerifyPhase;
 import com.company.testgen.redaction.RedactionFailedException;
 import com.company.testgen.validation.LocatorGrammarValidator;
@@ -75,6 +75,7 @@ public class PipelineOrchestrator {
     private final ParsePhase parsePhase;
     private final RedactionPhase redactionPhase;
     private final ContextAssemblyPhase contextPhase;
+    private final ResolvePhase resolvePhase;
     private final LlmClient llm;
     private final LocatorGrammarValidator grammarValidator;
     private final StaticDomValidator staticValidator;
@@ -145,6 +146,56 @@ public class PipelineOrchestrator {
         this.summaryWriter = Objects.requireNonNull(summaryWriter, "summaryWriter cannot be null");
         this.feedbackBuilder = feedbackBuilder != null ? feedbackBuilder : new CorrectiveFeedbackBuilder();
         this.maxAttempts = maxAttempts > 0 ? maxAttempts : 3;
+        this.verifyBlocking = verifyBlocking;
+        this.workspace = workspace;
+        this.resolvePhase = new ResolvePhase(
+                this.llm,
+                this.grammarValidator,
+                this.staticValidator,
+                this.attempts,
+                this.validations,
+                this.feedbackBuilder,
+                this.maxAttempts
+        );
+    }
+
+    public PipelineOrchestrator(
+            ParsePhase parsePhase,
+            RedactionPhase redactionPhase,
+            ContextAssemblyPhase contextPhase,
+            ResolvePhase resolvePhase,
+            GeneratePhase generatePhase,
+            VerifyPhase verifyPhase,
+            GitLabIntegrationService gitLab,
+            TargetAreaLock areaLock,
+            IdempotencyGate gate,
+            JobRepository jobs,
+            RetryAttemptRepository attempts,
+            ValidationResultRepository validations,
+            VerificationRepository verifications,
+            JobSummaryWriter summaryWriter,
+            boolean verifyBlocking,
+            Path workspace
+    ) {
+        this.parsePhase = Objects.requireNonNull(parsePhase, "parsePhase cannot be null");
+        this.redactionPhase = Objects.requireNonNull(redactionPhase, "redactionPhase cannot be null");
+        this.contextPhase = Objects.requireNonNull(contextPhase, "contextPhase cannot be null");
+        this.resolvePhase = Objects.requireNonNull(resolvePhase, "resolvePhase cannot be null");
+        this.llm = resolvePhase.llm();
+        this.grammarValidator = resolvePhase.grammarValidator();
+        this.staticValidator = resolvePhase.staticValidator();
+        this.generatePhase = generatePhase;
+        this.verifyPhase = verifyPhase;
+        this.gitLab = gitLab;
+        this.areaLock = areaLock != null ? areaLock : TargetAreaLock.inMemory();
+        this.gate = gate;
+        this.jobs = Objects.requireNonNull(jobs, "jobs cannot be null");
+        this.attempts = attempts != null ? attempts : new InMemoryRetryAttemptRepository();
+        this.validations = validations != null ? validations : new InMemoryValidationResultRepository();
+        this.verifications = verifications != null ? verifications : new InMemoryVerificationRepository();
+        this.summaryWriter = Objects.requireNonNull(summaryWriter, "summaryWriter cannot be null");
+        this.feedbackBuilder = new CorrectiveFeedbackBuilder();
+        this.maxAttempts = resolvePhase.maxAttempts();
         this.verifyBlocking = verifyBlocking;
         this.workspace = workspace;
     }
@@ -219,41 +270,11 @@ public class PipelineOrchestrator {
                 ExistingCodeContext context = assembled.codeContext();
 
                 // 6. Bounded Resolve + L0/L1 Retry Loop with Code-Enforced Locator Freeze (§6.6, §6.13)
-                ResolvedLocatorSet accepted = ResolvedLocatorSet.empty();
-                ValidationResult validation = null;
-                String feedback = null;
-                int attemptsUsed = 0;
-
-                if (llm != null) {
-                    writer.setState(PipelineState.RESOLVING);
-                    for (int attempt = 0; attempt < maxAttempts; attempt++) {
-                        attemptsUsed = attempt + 1;
-                        Mdc.phase(Phase.RESOLVE, attempt);
-                        Long attemptId = attempts.begin(activeJob.id(), attempt, Phase.RESOLVE);
-
-
-                        ResolvedLocatorSet proposed = llm.resolveLocators(
-                                new ResolveRequest(activeJob, safe.payload(), context, feedback, attempt, attemptId));
-
-                        // Enforce the freeze in CODE — the prompt instruction is only a hint (§6.13)
-                        ResolvedLocatorSet merged = accepted.mergeKeepingAccepted(proposed);
-
-                        validation = ValidationResult.merge(
-                                grammarValidator.validate(merged, safe.payload()),       // L0
-                                staticValidator.validate(merged, safe.payload()));       // L1
-
-                        validations.saveAll(attemptId, validation);
-                        attempts.finish(attemptId, validation.passed());
-
-                        accepted = merged.retainingPassing(validation);
-
-                        if (validation.passed()) {
-                            log.info("Locator validation PASSED on attempt {}", attempt);
-                            break;
-                        }
-                        feedback = feedbackBuilder.build(validation.blocking(), accepted);
-                    }
-                }
+                writer.setState(PipelineState.RESOLVING);
+                ResolvePhase.ResolveResult resolveResult = resolvePhase.execute(activeJob, safe.payload(), context);
+                ResolvedLocatorSet accepted = resolveResult.accepted();
+                ValidationResult validation = resolveResult.validation();
+                int attemptsUsed = resolveResult.attemptsUsed();
 
                 // Escalation if validation exhausted
                 if (validation != null && !validation.passed()) {
@@ -308,34 +329,56 @@ public class PipelineOrchestrator {
                             emitSummary(activeJob, escalatedOutcome, durationMs);
                             return escalatedOutcome;
                         }
+                    }
 
-                        // 8. L2 Dynamic Verification Phase (§6.8)
-                        if (verifyPhase != null && workspace != null) {
-                            writer.setState(PipelineState.VERIFYING);
-                            verify = verifyPhase.execute(activeJob, files, workspace);
-                            verifications.save(activeJob.id(), verify);
+                    // 8. L2 Dynamic Verification Phase (§6.8) - lock is NOT held across VerifyPhase (SPR-01)
+                    if (verifyPhase != null && workspace != null) {
+                        writer.setState(PipelineState.VERIFYING);
+                        verify = verifyPhase.execute(activeJob, files, workspace);
+                        verifications.save(activeJob.id(), verify);
 
-                            if (verify.isFailure() && verifyBlocking) {
-                                long durationMs = System.currentTimeMillis() - startTime;
-                                log.warn("L2 verification failed blocking gate for job {} — escalating", activeJob.id());
-                                writer.setState(PipelineState.NEEDS_HUMAN_REVIEW);
-                                if (gitLab != null) {
-                                    gitLab.publishEscalation(activeJob, files, ConfidenceTier.STATIC_ONLY,
-                                            "VERIFY_FAILED", accepted, validation, attemptsUsed);
-                                }
-                                PipelineOutcome escalatedOutcome = PipelineOutcome.escalated(
-                                        activeJob.id(), "VERIFY_FAILED", accepted, files, durationMs);
-                                emitSummary(activeJob, escalatedOutcome, durationMs);
-                                return escalatedOutcome;
+                        if (verify.isFailure() && verifyBlocking) {
+                            long durationMs = System.currentTimeMillis() - startTime;
+                            log.warn("L2 verification failed blocking gate for job {} — escalating", activeJob.id());
+                            writer.setState(PipelineState.NEEDS_HUMAN_REVIEW);
+                            if (gitLab != null) {
+                                gitLab.publishEscalation(activeJob, files, ConfidenceTier.STATIC_ONLY,
+                                        "VERIFY_FAILED", accepted, validation, attemptsUsed);
                             }
+                            PipelineOutcome escalatedOutcome = PipelineOutcome.escalated(
+                                    activeJob.id(), "VERIFY_FAILED", accepted, files, durationMs);
+                            emitSummary(activeJob, escalatedOutcome, durationMs);
+                            return escalatedOutcome;
                         }
+                    }
 
-                        tier = ConfidenceTier.from(verify, safe.payload());
+                    tier = ConfidenceTier.from(verify, safe.payload());
 
-                        // 9. GitLab Publication (§6.15, §7.5)
-                        MergeRequestResult mr = null;
-                        if (gitLab != null) {
-                            writer.setState(PipelineState.PUBLISHING);
+                    // 9. GitLab Publication (§6.15, §7.5) - re-acquire lock and re-check headSha("main")
+                    MergeRequestResult mr = null;
+                    if (gitLab != null) {
+                        writer.setState(PipelineState.PUBLISHING);
+                        try (var lock = areaLock.acquire(activeJob.targetArea())) {
+                            if (baseSha != null && !baseSha.equals(gitLab.headSha("main"))) {
+                                log.info("main HEAD SHA moved during L2 verification (was '{}', now '{}') — re-generating",
+                                        baseSha, gitLab.headSha("main"));
+                                context = contextPhase.execute(activeJob, safe.payload()).codeContext();
+                                baseSha = gitLab.headSha("main");
+                                try {
+                                    files = generatePhase.execute(safe.payload(), accepted, context, baseSha);
+                                } catch (EscalationRequired er) {
+                                    long durationMs = System.currentTimeMillis() - startTime;
+                                    log.warn("Generate phase required escalation on re-generation: {} ({})", er.reasonCode(), er.report());
+                                    writer.setState(PipelineState.NEEDS_HUMAN_REVIEW);
+                                    gitLab.publishEscalation(activeJob, null, ConfidenceTier.STATIC_ONLY,
+                                            er.reasonCode(), accepted, validation, attemptsUsed);
+                                    PipelineOutcome escalatedOutcome = PipelineOutcome.escalated(
+                                            activeJob.id(), er.reasonCode(), accepted, List.of(), durationMs);
+                                    emitSummary(activeJob, escalatedOutcome, durationMs);
+                                    return escalatedOutcome;
+                                }
+                            }
+
                             mr = gitLab.publish(
                                     activeJob,
                                     files,
@@ -349,10 +392,10 @@ public class PipelineOrchestrator {
                                     Math.max(1, attemptsUsed),
                                     BigDecimal.ZERO
                             );
+                            writer.complete(tier.name(), mr != null ? mr.iid() : null, mr != null ? mr.webUrl() : null);
                         }
-
-                        // Mark complete with fencing
-                        writer.complete(tier.name(), mr != null ? mr.iid() : null, mr != null ? mr.webUrl() : null);
+                    } else {
+                        writer.complete(tier.name(), null, null);
                     }
                 } else {
                     tier = ConfidenceTier.from(null, safe.payload());
@@ -407,7 +450,6 @@ public class PipelineOrchestrator {
 
             PipelineOutcome outcome = PipelineOutcome.failure(
                     job.id(),
-
                     "REDACTION_FAILED: " + rfe.getMessage(),
                     PipelineOutcome.EXIT_REDACTION_FAILURE,
                     durationMs
@@ -470,6 +512,10 @@ public class PipelineOrchestrator {
 
     public ContextAssemblyPhase contextPhase() {
         return contextPhase;
+    }
+
+    public ResolvePhase resolvePhase() {
+        return resolvePhase;
     }
 
     public JobRepository jobRepository() {

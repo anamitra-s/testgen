@@ -1,0 +1,53 @@
+{
+  "contractVersion": 2,
+  "recorderVersion": "3.1.0",
+  "capturedAt": "2026-10-15T12:00:00Z",
+  "targetArea": "dashboard",
+  "baseUrl": "https://app.example.com",
+  "snapshots": [
+    {
+      "stateId": "s0",
+      "url": "https://app.example.com/dashboard",
+      "prunedHtml": "<main id=\"dashboard\"><button data-testid=\"refresh-button\">Refresh</button><button role=\"button\">Export Report</button></main>",
+      "prunedNodeCount": 4,
+      "truncated": false
+    }
+  ],
+  "interactions": [
+    {
+      "elementRefId": "e1",
+      "stateId": "s0",
+      "actionIndex": 0,
+      "tagName": "button",
+      "role": "button",
+      "accessibleName": "Refresh",
+      "attributes": {
+        "data-testid": "refresh-button"
+      },
+      "fingerprint": {
+        "tagName": "button",
+        "role": "button",
+        "accessibleName": "Refresh",
+        "normalizedText": "Refresh",
+        "ordinalAmongRolePeers": 0,
+        "domPathHash": "sha256:hash-refresh"
+      }
+    },
+    {
+      "elementRefId": "e2",
+      "stateId": "s0",
+      "actionIndex": 1,
+      "tagName": "button",
+      "role": "button",
+      "accessibleName": "Export Report",
+      "fingerprint": {
+        "tagName": "button",
+        "role": "button",
+        "accessibleName": "Export Report",
+        "normalizedText": "Export Report",
+        "ordinalAmongRolePeers": 1,
+        "domPathHash": "sha256:hash-export"
+      }
+    }
+  ]
+}

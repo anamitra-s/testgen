@@ -8,6 +8,7 @@ import com.company.testgen.model.Phase;
 import com.company.testgen.model.ResolvedLocator;
 import com.company.testgen.model.ResolvedLocatorSet;
 import com.company.testgen.util.Json;
+import com.company.testgen.persistence.InMemoryCostEventRepository;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.SystemMessage;
@@ -18,11 +19,14 @@ import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.request.ResponseFormatType;
 import dev.langchain4j.model.chat.response.ChatResponse;
+import dev.langchain4j.model.chat.response.ChatResponseMetadata;
+import dev.langchain4j.model.output.TokenUsage;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -160,8 +164,8 @@ class LangChain4jLlmClientTest {
                 capturedRequest.set(chatRequest);
                 return ChatResponse.builder()
                         .aiMessage(AiMessage.from(Json.stringify(expectedResponse)))
-                        .metadata(AnthropicChatResponseMetadata.builder().build())
-                        .build();
+                        .metadata(AnthropicChatResponseMetadata.builder().build()
+                        ).build();
             }
         };
 
@@ -406,5 +410,95 @@ class LangChain4jLlmClientTest {
 
         UserMessage userMsg = (UserMessage) capturedRequest.get().messages().get(1);
         assertThat(userMsg.singleText()).contains("Line 42 in BillingTest.java exceeds 140 characters");
+    }
+
+    @Test
+    @DisplayName("recordUsage extracts standard dev.langchain4j.model.output.TokenUsage without ClassCastException")
+    void testRecordUsageStandardTokenUsage() {
+        ResolvedLocatorSet expectedResponse = new ResolvedLocatorSet(List.of(
+                new ResolvedLocator("e1", LocatorStrategy.TEST_ID, "submit-btn", null, "page.getByTestId(\"submit-btn\")")
+        ));
+        String responseJson = Json.stringify(expectedResponse);
+
+        TokenUsage standardTokens = new TokenUsage(1200, 150);
+
+        ChatResponseMetadata metadata = ChatResponseMetadata.builder()
+                .tokenUsage(standardTokens)
+                .build();
+
+        ChatModel fakeModel = new ChatModel() {
+            @Override
+            public ChatResponse chat(ChatRequest chatRequest) {
+                return ChatResponse.builder()
+                        .aiMessage(AiMessage.from(responseJson))
+                        .metadata(metadata)
+                        .build();
+            }
+        };
+
+        LangChain4jLlmClient client = new LangChain4jLlmClient(
+                "gemini-2.5-flash",
+                fakeModel,
+                budgetGuard,
+                promptBundle,
+                new TransportRetryPolicy(0)
+        );
+
+        ResolveRequest request = new ResolveRequest(
+                jobId,
+                1L,
+                0,
+                "{}",
+                "{\"dom\":\"<button data-testid='submit-btn'>Submit</button>\"}",
+                "{}",
+                null
+        );
+
+        ResolvedLocatorSet result = client.resolveLocators(request);
+        assertThat(result).isNotNull();
+
+        List<CostEvent> events = repo.findByJobId(jobId);
+        assertThat(events).hasSize(1);
+        CostEvent event = events.getFirst();
+        assertThat(event.phase()).isEqualTo(Phase.RESOLVE);
+        assertThat(event.tokenUsage().inputTokens()).isEqualTo(1200);
+        assertThat(event.tokenUsage().outputTokens()).isEqualTo(150);
+        assertThat(event.tokenUsage().cacheCreationTokens()).isEqualTo(0);
+        assertThat(event.tokenUsage().cacheReadTokens()).isEqualTo(0);
+    }
+
+    @Test
+    @DisplayName("Constructor defaults modelId to gemini-2.5-flash when provider is gemini and modelId is default claude-sonnet-5")
+    void testConstructorGeminiModelDefaulting() {
+        com.company.testgen.config.PipelineProperties props = com.company.testgen.config.PipelineProperties.defaults("dummy-gemini-key")
+                .withProvider("gemini");
+        LangChain4jLlmClient client = new LangChain4jLlmClient(props, budgetGuard, promptBundle);
+        assertThat(client.modelId()).isEqualTo("gemini-2.5-flash");
+    }
+
+    @Test
+    @DisplayName("Constructor retains explicit modelId when provider is gemini")
+    void testConstructorGeminiExplicitModel() {
+        com.company.testgen.config.PipelineProperties props = com.company.testgen.config.PipelineProperties.defaults("dummy-gemini-key");
+        com.company.testgen.config.PipelineProperties.LlmProperties customLlm = new com.company.testgen.config.PipelineProperties.LlmProperties(
+                "gemini",
+                "gemini-2.5-pro",
+                "",
+                0,
+                "dummy-gemini-key",
+                8192,
+                0.0,
+                Duration.ofSeconds(120),
+                3,
+                Duration.ofSeconds(2),
+                true,
+                false
+        );
+        com.company.testgen.config.PipelineProperties customProps = new com.company.testgen.config.PipelineProperties(
+                props.ingestion(), customLlm, props.budget(), props.retry(), props.dom(), props.redaction(),
+                props.validation(), props.gitlab(), props.db(), props.idempotency(), props.eval(), props.retention(), props.session()
+        );
+        LangChain4jLlmClient client = new LangChain4jLlmClient(customProps, budgetGuard, promptBundle);
+        assertThat(client.modelId()).isEqualTo("gemini-2.5-pro");
     }
 }

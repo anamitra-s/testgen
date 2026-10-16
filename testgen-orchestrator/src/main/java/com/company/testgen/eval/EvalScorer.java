@@ -12,6 +12,8 @@ import java.util.Objects;
  * Compares actual resolved locators with reference expected locators.
  * Exact match compares semantics, not rendered strings (whitespace/formatting differences
  * must not register as regressions).
+ * Cases marked expectedToEscalate: true score as passing when the pipeline escalates to
+ * NEEDS_HUMAN_REVIEW rather than emitting a false-confident locator.
  */
 public class EvalScorer {
 
@@ -38,7 +40,13 @@ public class EvalScorer {
             }
         }
 
-        boolean firstAttemptPass = outcome.attemptsUsed() == 1 && !outcome.escalated();
+        boolean firstAttemptPass;
+        if (c.expectedToEscalate()) {
+            // Case is curated specifically to verify proper escalation without false confidence (§8.2)
+            firstAttemptPass = outcome.escalated();
+        } else {
+            firstAttemptPass = outcome.attemptsUsed() == 1 && !outcome.escalated();
+        }
 
         return new CaseScore(
                 c.caseId(),

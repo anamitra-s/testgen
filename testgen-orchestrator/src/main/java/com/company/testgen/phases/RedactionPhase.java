@@ -1,4 +1,4 @@
-package com.company.testgen.phase;
+package com.company.testgen.phases;
 
 import com.company.testgen.model.PageSnapshot;
 import com.company.testgen.model.ParsedTestPlan;

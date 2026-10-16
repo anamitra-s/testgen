@@ -11,7 +11,8 @@ public record GateOutcome(
         List<String> failures,
         String message,
         EvalRun candidate,
-        EvalRun baseline
+        EvalRun baseline,
+        List<String> diagnostics
 ) {
     public static final String STATUS_PASS = "PASS";
     public static final String STATUS_FAIL = "FAIL";
@@ -19,6 +20,11 @@ public record GateOutcome(
 
     public GateOutcome {
         failures = failures != null ? List.copyOf(failures) : List.of();
+        diagnostics = diagnostics != null ? List.copyOf(diagnostics) : List.of();
+    }
+
+    public GateOutcome(String status, List<String> failures, String message, EvalRun candidate, EvalRun baseline) {
+        this(status, failures, message, candidate, baseline, List.of());
     }
 
     public boolean isPass() {
@@ -34,27 +40,36 @@ public record GateOutcome(
     }
 
     public static GateOutcome pass(EvalRun candidate, EvalRun baseline) {
-        return new GateOutcome(STATUS_PASS, List.of(), "Statistical evaluation gate passed", candidate, baseline);
+        return new GateOutcome(STATUS_PASS, List.of(), "Statistical evaluation gate passed", candidate, baseline, List.of());
+    }
+
+    public static GateOutcome pass(EvalRun candidate, EvalRun baseline, List<String> diagnostics) {
+        return new GateOutcome(STATUS_PASS, List.of(), "Statistical evaluation gate passed", candidate, baseline, diagnostics);
     }
 
     public static GateOutcome pass(EvalRun candidate) {
-        return new GateOutcome(STATUS_PASS, List.of(), "Statistical evaluation gate passed", candidate, null);
+        return new GateOutcome(STATUS_PASS, List.of(), "Statistical evaluation gate passed", candidate, null, List.of());
     }
 
     public static GateOutcome fail(List<String> failures, EvalRun candidate, EvalRun baseline) {
         String msg = String.join("; ", failures);
-        return new GateOutcome(STATUS_FAIL, failures, msg, candidate, baseline);
+        return new GateOutcome(STATUS_FAIL, failures, msg, candidate, baseline, List.of());
+    }
+
+    public static GateOutcome fail(List<String> failures, EvalRun candidate, EvalRun baseline, List<String> diagnostics) {
+        String msg = String.join("; ", failures);
+        return new GateOutcome(STATUS_FAIL, failures, msg, candidate, baseline, diagnostics);
     }
 
     public static GateOutcome fail(List<String> failures) {
-        return new GateOutcome(STATUS_FAIL, failures, String.join("; ", failures), null, null);
+        return new GateOutcome(STATUS_FAIL, failures, String.join("; ", failures), null, null, List.of());
     }
 
     public static GateOutcome noBaseline(String message, EvalRun candidate) {
-        return new GateOutcome(STATUS_NO_BASELINE, List.of(), message, candidate, null);
+        return new GateOutcome(STATUS_NO_BASELINE, List.of(), message, candidate, null, List.of());
     }
 
     public static GateOutcome noBaseline(String message) {
-        return new GateOutcome(STATUS_NO_BASELINE, List.of(), message, null, null);
+        return new GateOutcome(STATUS_NO_BASELINE, List.of(), message, null, null, List.of());
     }
 }

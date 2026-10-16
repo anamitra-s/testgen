@@ -25,6 +25,11 @@ public class JobRecordMapper implements RowMapper<JobRecord> {
         int mrIidVal = rs.getInt("mr_iid");
         Integer mrIid = rs.wasNull() ? null : mrIidVal;
 
+        String buildUrl = null;
+        try {
+            buildUrl = rs.getString("build_url");
+        } catch (SQLException ignored) {}
+
         return new JobRecord(
                 rs.getObject("id", UUID.class),
                 rs.getString("idempotency_key"),
@@ -43,6 +48,7 @@ public class JobRecordMapper implements RowMapper<JobRecord> {
                 rs.getString("lease_owner"),
                 rs.getLong("lease_epoch"),
                 leaseExpires != null ? leaseExpires.toInstant() : null,
+                buildUrl,
                 rs.getString("redaction_report"),
                 mrIid,
                 rs.getString("mr_url"),

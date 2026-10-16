@@ -14,6 +14,18 @@ public class EffectExhaustedException extends RuntimeException {
         this.effectKey = effectKey;
     }
 
+    public EffectExhaustedException(String message) {
+        super(message);
+        this.effectType = null;
+        this.effectKey = null;
+    }
+
+    public EffectExhaustedException(EffectType effectType, String effectKey, String message) {
+        super(message);
+        this.effectType = effectType;
+        this.effectKey = effectKey;
+    }
+
     public EffectType getEffectType() {
         return effectType;
     }

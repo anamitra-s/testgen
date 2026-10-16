@@ -1,5 +1,6 @@
 package com.company.testgen.llm;
 
+import com.company.testgen.config.PipelineProperties;
 import com.company.testgen.model.GeneratedFileSet;
 import com.company.testgen.model.Phase;
 import com.company.testgen.model.ResolvedLocatorSet;
@@ -15,13 +16,15 @@ import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.request.ResponseFormat;
 import dev.langchain4j.model.chat.request.ResponseFormatType;
 import dev.langchain4j.model.chat.response.ChatResponse;
+import dev.langchain4j.model.googleai.GoogleAiGeminiChatModel;
 
+import java.util.Locale;
 import java.util.Objects;
 import java.util.UUID;
 
 /**
- * Anthropic-backed implementation of LlmClient using low-level ChatModel API (§6.10).
- * Configured with cacheSystemMessages(true), zero tools with cacheTools(false), and native Structured Outputs.
+ * Dual-provider (Anthropic / Gemini) implementation of LlmClient using low-level ChatModel API (§6.10, NFR-25).
+ * Configured with cache-first system messages, zero tools with cacheTools(false), and native Structured Outputs.
  */
 public class LangChain4jLlmClient implements LlmClient {
 
@@ -33,37 +36,51 @@ public class LangChain4jLlmClient implements LlmClient {
     private final TransportRetryPolicy transport;
 
     public LangChain4jLlmClient(PipelineProperties props, TokenBudgetGuard budget, PromptBundle prompts) {
-        this.modelId = props.llm().modelId();
-        this.model = AnthropicChatModel.builder()
-                .apiKey(props.llm().apiKey())
-                .modelName(modelId)
-                .cacheSystemMessages(true)   // cache_control on the last system block
-                .cacheTools(false)           // we send ZERO tools - avoids blowing cache block limit
-                .temperature(0.0)            // minimize variance; does not guarantee determinism
-                .maxTokens(props.llm().maxOutputTokens())
-                .maxRetries(0)               // transport retries owned by TransportRetryPolicy
-                .timeout(props.llm().timeout())
-                .build();
-        this.budget = Objects.requireNonNull(budget, "budget must not be null");
-        this.prompts = Objects.requireNonNull(prompts, "prompts must not be null");
-        this.transport = new TransportRetryPolicy(props.llm().transportRetries());
-    }
-
-    public LangChain4jLlmClient(com.company.testgen.config.PipelineProperties props, TokenBudgetGuard budget, PromptBundle prompts) {
-        this.modelId = props.llm().modelId();
-        this.model = AnthropicChatModel.builder()
-                .apiKey(props.llm().apiKey() != null ? props.llm().apiKey() : "dummy-key")
-                .modelName(modelId)
-                .cacheSystemMessages(props.llm().cacheSystemMessages())
-                .cacheTools(props.llm().cacheTools())
-                .temperature(props.llm().temperature())
-                .maxTokens(props.llm().maxOutputTokens())
-                .maxRetries(0)
-                .timeout(props.llm().timeout())
-                .build();
+        Objects.requireNonNull(props, "props must not be null");
         this.budget = Objects.requireNonNull(budget, "budget must not be null");
         this.prompts = Objects.requireNonNull(prompts, "prompts must not be null");
         this.transport = new TransportRetryPolicy(props.llm().transportRetries(), props.llm().transportBackoffBase());
+
+        String provider = props.llm().provider() != null
+                ? props.llm().provider().toLowerCase(Locale.ROOT)
+                : "anthropic";
+
+        String configuredModel = props.llm().modelId();
+        String apiKey = props.llm().apiKey() != null ? props.llm().apiKey() : "dummy-key";
+
+        switch (provider) {
+            case "anthropic" -> {
+                this.modelId = configuredModel != null && !configuredModel.isBlank()
+                        ? configuredModel
+                        : "claude-sonnet-5";
+                this.model = AnthropicChatModel.builder()
+                        .apiKey(apiKey)
+                        .modelName(this.modelId)
+                        .cacheSystemMessages(true)   // cache_control on the last system block
+                        .cacheTools(false)           // we send ZERO tools - avoids blowing cache block limit
+                        .temperature(0.0)            // minimize variance; does not guarantee determinism
+                        .maxTokens(props.llm().maxOutputTokens())
+                        .maxRetries(0)               // transport retries owned by TransportRetryPolicy
+                        .timeout(props.llm().timeout())
+                        .build();
+            }
+            case "gemini" -> {
+                if (configuredModel == null || configuredModel.isBlank() || "claude-sonnet-5".equals(configuredModel)) {
+                    this.modelId = "gemini-2.5-flash";
+                } else {
+                    this.modelId = configuredModel;
+                }
+                this.model = GoogleAiGeminiChatModel.builder()
+                        .apiKey(apiKey)
+                        .modelName(this.modelId)
+                        .temperature(0.0)
+                        .maxOutputTokens(props.llm().maxOutputTokens())
+                        .maxRetries(0)
+                        .timeout(props.llm().timeout())
+                        .build();
+            }
+            default -> throw new IllegalArgumentException("Unsupported LLM provider for LangChain4jLlmClient: " + provider);
+        }
     }
 
     /**
@@ -79,6 +96,10 @@ public class LangChain4jLlmClient implements LlmClient {
         this.budget = Objects.requireNonNull(budget, "budget must not be null");
         this.prompts = Objects.requireNonNull(prompts, "prompts must not be null");
         this.transport = Objects.requireNonNull(transport, "transport must not be null");
+    }
+
+    public String modelId() {
+        return modelId;
     }
 
     @Override
@@ -166,19 +187,19 @@ public class LangChain4jLlmClient implements LlmClient {
     private void recordUsage(LlmRequest req, Phase phase, ChatResponse response) {
         UUID jobId = (req != null && req.jobId() != null) ? req.jobId() : UUID.randomUUID();
         Long attemptId = req != null ? req.attemptId() : null;
-        if (response.metadata() instanceof AnthropicChatResponseMetadata anthropicMeta
+        if (response != null && response.metadata() instanceof AnthropicChatResponseMetadata anthropicMeta
                 && anthropicMeta.tokenUsage() instanceof AnthropicTokenUsage u) {
             budget.record(jobId, attemptId, phase, modelId, new TokenUsage(
-                    u.inputTokenCount(),
-                    u.outputTokenCount(),
+                    u.inputTokenCount() != null ? u.inputTokenCount() : 0,
+                    u.outputTokenCount() != null ? u.outputTokenCount() : 0,
                     u.cacheCreationInputTokens() != null ? u.cacheCreationInputTokens() : 0,
                     u.cacheReadInputTokens() != null ? u.cacheReadInputTokens() : 0
             ));
-        } else if (response.metadata() != null && response.metadata().tokenUsage() != null) {
-            var standardUsage = response.metadata().tokenUsage();
+        } else if (response != null && response.metadata() != null) {
+            dev.langchain4j.model.output.TokenUsage u = response.metadata().tokenUsage();
             budget.record(jobId, attemptId, phase, modelId, new TokenUsage(
-                    standardUsage.inputTokenCount(),
-                    standardUsage.outputTokenCount(),
+                    u != null && u.inputTokenCount() != null ? u.inputTokenCount() : 0,
+                    u != null && u.outputTokenCount() != null ? u.outputTokenCount() : 0,
                     0,
                     0
             ));

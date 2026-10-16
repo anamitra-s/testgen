@@ -1,6 +1,7 @@
 package com.company.testgen.persistence;
 
 import com.company.testgen.idempotency.EffectType;
+import com.company.testgen.idempotency.LeaseLostException;
 import org.jdbi.v3.core.Handle;
 import org.jdbi.v3.core.Jdbi;
 import org.jdbi.v3.core.statement.StatementContext;
@@ -16,7 +17,8 @@ import java.util.Optional;
 import java.util.UUID;
 
 /**
- * JDBI 3 implementation of {@link EffectRepository} (§6.14, §7.5).
+ * JDBI 3 implementation of {@link EffectRepository} (§6.14, §7.4, §7.5).
+ * All worker effect mutations are strictly fenced against {@code jobs.lease_epoch} (ADR-012, §7.4).
  */
 public class JdbiEffectRepository implements EffectRepository {
 
@@ -72,6 +74,17 @@ public class JdbiEffectRepository implements EffectRepository {
         this.jdbi = Objects.requireNonNull(jdbi, "jdbi cannot be null");
     }
 
+    private void checkLeaseEpoch(Handle handle, UUID jobId, long leaseEpoch) {
+        if (jobId == null) return;
+        Optional<Long> currentEpoch = handle.createQuery("SELECT lease_epoch FROM jobs WHERE id = :jobId")
+                .bind("jobId", jobId)
+                .mapTo(Long.class)
+                .findOne();
+        if (currentEpoch.isPresent() && currentEpoch.get() != leaseEpoch) {
+            throw new LeaseLostException(jobId, leaseEpoch);
+        }
+    }
+
     @Override
     public Optional<EffectRecord> find(UUID jobId, EffectType type, String effectKey) {
         return jdbi.withHandle(handle -> find(handle, jobId, type, effectKey));
@@ -94,11 +107,28 @@ public class JdbiEffectRepository implements EffectRepository {
 
     @Override
     public void reserve(Handle handle, UUID jobId, EffectType type, String effectKey, long leaseEpoch) {
+        checkLeaseEpoch(handle, jobId, leaseEpoch);
         handle.createUpdate(RESERVE_SQL)
                 .bind("jobId", jobId)
                 .bind("effectType", type.name())
                 .bind("effectKey", effectKey)
                 .bind("leaseEpoch", leaseEpoch)
+                .execute();
+    }
+
+    @Override
+    public void confirm(UUID jobId, long leaseEpoch, EffectType type, String effectKey, String externalId) {
+        jdbi.useHandle(handle -> confirm(handle, jobId, leaseEpoch, type, effectKey, externalId));
+    }
+
+    @Override
+    public void confirm(Handle handle, UUID jobId, long leaseEpoch, EffectType type, String effectKey, String externalId) {
+        checkLeaseEpoch(handle, jobId, leaseEpoch);
+        handle.createUpdate(CONFIRM_SQL)
+                .bind("jobId", jobId)
+                .bind("effectType", type.name())
+                .bind("effectKey", effectKey)
+                .bind("externalId", externalId)
                 .execute();
     }
 
@@ -109,6 +139,10 @@ public class JdbiEffectRepository implements EffectRepository {
 
     @Override
     public void confirm(Handle handle, UUID jobId, EffectType type, String effectKey, String externalId) {
+        Optional<EffectRecord> existing = find(handle, jobId, type, effectKey);
+        if (existing.isPresent()) {
+            checkLeaseEpoch(handle, jobId, existing.get().leaseEpoch());
+        }
         handle.createUpdate(CONFIRM_SQL)
                 .bind("jobId", jobId)
                 .bind("effectType", type.name())
@@ -119,12 +153,42 @@ public class JdbiEffectRepository implements EffectRepository {
 
     @Override
     public void confirm(EffectRecord record, String externalId) {
-        confirm(record.jobId(), record.effectType(), record.effectKey(), externalId);
+        Objects.requireNonNull(record, "record cannot be null");
+        confirmUnfenced(record.jobId(), record.effectType(), record.effectKey(), externalId);
     }
 
     @Override
     public void confirm(Handle handle, EffectRecord record, String externalId) {
-        confirm(handle, record.jobId(), record.effectType(), record.effectKey(), externalId);
+        Objects.requireNonNull(record, "record cannot be null");
+        confirmUnfenced(handle, record.jobId(), record.effectType(), record.effectKey(), externalId);
+    }
+
+    private void confirmUnfenced(UUID jobId, EffectType type, String effectKey, String externalId) {
+        jdbi.useHandle(handle -> confirmUnfenced(handle, jobId, type, effectKey, externalId));
+    }
+
+    private void confirmUnfenced(Handle handle, UUID jobId, EffectType type, String effectKey, String externalId) {
+        handle.createUpdate(CONFIRM_SQL)
+                .bind("jobId", jobId)
+                .bind("effectType", type.name())
+                .bind("effectKey", effectKey)
+                .bind("externalId", externalId)
+                .execute();
+    }
+
+    @Override
+    public void incrementAttempts(UUID jobId, long leaseEpoch, EffectType type, String effectKey) {
+        jdbi.useHandle(handle -> incrementAttempts(handle, jobId, leaseEpoch, type, effectKey));
+    }
+
+    @Override
+    public void incrementAttempts(Handle handle, UUID jobId, long leaseEpoch, EffectType type, String effectKey) {
+        checkLeaseEpoch(handle, jobId, leaseEpoch);
+        handle.createUpdate(INCREMENT_ATTEMPTS_SQL)
+                .bind("jobId", jobId)
+                .bind("effectType", type.name())
+                .bind("effectKey", effectKey)
+                .execute();
     }
 
     @Override
@@ -134,7 +198,26 @@ public class JdbiEffectRepository implements EffectRepository {
 
     @Override
     public void incrementAttempts(Handle handle, UUID jobId, EffectType type, String effectKey) {
+        Optional<EffectRecord> existing = find(handle, jobId, type, effectKey);
+        if (existing.isPresent()) {
+            checkLeaseEpoch(handle, jobId, existing.get().leaseEpoch());
+        }
         handle.createUpdate(INCREMENT_ATTEMPTS_SQL)
+                .bind("jobId", jobId)
+                .bind("effectType", type.name())
+                .bind("effectKey", effectKey)
+                .execute();
+    }
+
+    @Override
+    public void abandon(UUID jobId, long leaseEpoch, EffectType type, String effectKey, String reason) {
+        jdbi.useHandle(handle -> abandon(handle, jobId, leaseEpoch, type, effectKey, reason));
+    }
+
+    @Override
+    public void abandon(Handle handle, UUID jobId, long leaseEpoch, EffectType type, String effectKey, String reason) {
+        checkLeaseEpoch(handle, jobId, leaseEpoch);
+        handle.createUpdate(ABANDON_SQL)
                 .bind("jobId", jobId)
                 .bind("effectType", type.name())
                 .bind("effectKey", effectKey)
@@ -148,6 +231,10 @@ public class JdbiEffectRepository implements EffectRepository {
 
     @Override
     public void abandon(Handle handle, UUID jobId, EffectType type, String effectKey, String reason) {
+        Optional<EffectRecord> existing = find(handle, jobId, type, effectKey);
+        if (existing.isPresent()) {
+            checkLeaseEpoch(handle, jobId, existing.get().leaseEpoch());
+        }
         handle.createUpdate(ABANDON_SQL)
                 .bind("jobId", jobId)
                 .bind("effectType", type.name())
@@ -157,12 +244,26 @@ public class JdbiEffectRepository implements EffectRepository {
 
     @Override
     public void abandon(EffectRecord record, String reason) {
-        abandon(record.jobId(), record.effectType(), record.effectKey(), reason);
+        Objects.requireNonNull(record, "record cannot be null");
+        abandonUnfenced(record.jobId(), record.effectType(), record.effectKey(), reason);
     }
 
     @Override
     public void abandon(Handle handle, EffectRecord record, String reason) {
-        abandon(handle, record.jobId(), record.effectType(), record.effectKey(), reason);
+        Objects.requireNonNull(record, "record cannot be null");
+        abandonUnfenced(handle, record.jobId(), record.effectType(), record.effectKey(), reason);
+    }
+
+    private void abandonUnfenced(UUID jobId, EffectType type, String effectKey, String reason) {
+        jdbi.useHandle(handle -> abandonUnfenced(handle, jobId, type, effectKey, reason));
+    }
+
+    private void abandonUnfenced(Handle handle, UUID jobId, EffectType type, String effectKey, String reason) {
+        handle.createUpdate(ABANDON_SQL)
+                .bind("jobId", jobId)
+                .bind("effectType", type.name())
+                .bind("effectKey", effectKey)
+                .execute();
     }
 
     @Override

@@ -22,6 +22,7 @@ CREATE TABLE jobs (
     lease_owner           TEXT,
     lease_epoch           BIGINT      NOT NULL DEFAULT 0,
     lease_expires_at      TIMESTAMPTZ,
+    build_url             TEXT,
 
     redaction_report      JSONB,
     mr_iid                INT,
@@ -37,7 +38,7 @@ CREATE INDEX idx_jobs_area_time   ON jobs (target_area, created_at DESC);
 CREATE INDEX idx_jobs_lease       ON jobs (lease_expires_at)
        WHERE state NOT IN ('DONE','FAILED','NEEDS_HUMAN_REVIEW');
 
--- ════════════════════════════════ ATTEMPTS ═══════════════════════════════
+-- ════════════════════════════════ ATTEMPTS ════════════════════════════════
 CREATE TABLE retry_attempts (
     id             BIGSERIAL PRIMARY KEY,
     job_id         UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,

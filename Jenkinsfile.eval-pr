@@ -25,15 +25,16 @@ pipeline {
       steps {
         withCredentials([
           string(credentialsId: 'anthropic-api-key', variable: 'ANTHROPIC_API_KEY'),
+          string(credentialsId: 'testgen-db-url',    variable: 'TESTGEN_DB_URL'),
           usernamePassword(credentialsId: 'testgen-db', usernameVariable: 'TESTGEN_DB_USER',
                                                         passwordVariable: 'TESTGEN_DB_PASSWORD')
         ]) {
           sh '''
-            java -jar testgen-orchestrator/target/testgen-orchestrator.jar eval \\
-              --suite=smoke \\
-              --repeats=1 \\
-              --concurrency=4 \\
-              --gate=advisory \\
+            java -jar testgen-orchestrator/target/testgen-orchestrator.jar eval \
+              --suite=smoke \
+              --repeats=1 \
+              --concurrency=4 \
+              --gate=advisory \
               --report=eval-report.json
           '''
         }
@@ -62,15 +63,23 @@ pipeline {
 - **Build URL:** ${env.BUILD_URL}
 _Note: PR gate is advisory only (§8.5). Real quality gate runs nightly._"""
 
-              // Post advisory note to GitLab MR
+              // Post advisory note to GitLab MR without shell injection
               def projectId = env.CI_PROJECT_ID ?: env.GITLAB_PROJECT_ID ?: 'qa%2Ftestgen-orchestrator'
               def gitlabApiUrl = env.GITLAB_API_URL ?: 'https://gitlab.example.com/api/v4'
-              sh """
-                curl -s -X POST "${gitlabApiUrl}/projects/${projectId}/merge_requests/${mrIid}/notes" \\
-                  -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \\
-                  -H "Content-Type: application/json" \\
-                  -d '{"body": ${groovy.json.JsonOutput.toJson(commentBody)}}' || true
-              """
+              writeFile file: 'mr-note.json', text: groovy.json.JsonOutput.toJson([body: commentBody])
+              withEnv([
+                "PARAM_GITLAB_API_URL=${gitlabApiUrl}",
+                "PARAM_PROJECT_ID=${projectId}",
+                "PARAM_MR_IID=${mrIid}"
+              ]) {
+                sh '''
+                  curl -s -X POST "$PARAM_GITLAB_API_URL/projects/$PARAM_PROJECT_ID/merge_requests/$PARAM_MR_IID/notes" \
+                    -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+                    -H "Content-Type: application/json" \
+                    -d @mr-note.json || true
+                  rm -f mr-note.json
+                '''
+              }
             }
           }
         }

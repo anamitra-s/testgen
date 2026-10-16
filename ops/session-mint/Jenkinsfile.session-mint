@@ -25,11 +25,15 @@ pipeline {
           usernamePassword(credentialsId: 'composer-svc-creds', usernameVariable: 'COMPOSER_SVC_USER', passwordVariable: 'COMPOSER_SVC_PASSWORD'),
           usernamePassword(credentialsId: 'statsimport-svc-creds', usernameVariable: 'STATSIMPORT_SVC_USER', passwordVariable: 'STATSIMPORT_SVC_PASSWORD')
         ]) {
-          sh """
-            export VAULT_ADDR="\${VAULT_ADDR:-https://vault.internal.net:8200}"
-            export VAULT_PATH="secret/testgen/sessions"
-            bash ops/session-mint/mint-sessions.sh "${params.TARGET_AREA}"
-          """
+          withEnv([
+            "PARAM_TARGET_AREA=${params.TARGET_AREA}"
+          ]) {
+            sh '''
+              export VAULT_ADDR="${VAULT_ADDR:-https://vault.internal.net:8200}"
+              export VAULT_PATH="secret/testgen/sessions"
+              bash ops/session-mint/mint-sessions.sh "$PARAM_TARGET_AREA"
+            '''
+          }
         }
       }
     }

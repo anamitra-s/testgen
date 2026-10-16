@@ -40,16 +40,32 @@ public class LocatorGrammarValidator {
         Set<String> expectedRefs = plan.interactedRefIds();
 
         for (ResolvedLocator l : set.locators()) {
+            if (l == null) {
+                continue;
+            }
+
             if (l.elementRefId() == null || !expectedRefs.contains(l.elementRefId())) {
                 violations.add(blocking(l, "UNKNOWN_ELEMENT_REF", "not present in the recording"));
             }
 
+            if (l.strategy() == null) {
+                violations.add(blocking(l, "INVALID_STRATEGY", "locator strategy cannot be null"));
+                continue;
+            }
+
+            boolean malformed = false;
             if (l.value() == null || l.value().isBlank()) {
                 violations.add(blocking(l, "EMPTY_VALUE", null));
+                malformed = true;
             }
 
             if (l.strategy() == LocatorStrategy.ROLE_NAME && !AriaRoles.isValid(l.role())) {
                 violations.add(blocking(l, "INVALID_ROLE", l.role()));
+                malformed = true;
+            }
+
+            if (malformed) {
+                continue;
             }
 
             String expr;
@@ -73,7 +89,7 @@ public class LocatorGrammarValidator {
 
         // Completeness: every interacted element must have exactly one locator
         Map<String, Long> perRef = set.locators().stream()
-                .filter(l -> l.elementRefId() != null)
+                .filter(l -> l != null && l.elementRefId() != null)
                 .collect(Collectors.groupingBy(ResolvedLocator::elementRefId, Collectors.counting()));
 
         expectedRefs.forEach(ref -> {
@@ -105,6 +121,13 @@ public class LocatorGrammarValidator {
     }
 
     private static String safeRender(ResolvedLocator l) {
+        if (l == null || l.strategy() == null) {
+            return null;
+        }
+        if (l.value() == null || l.value().isBlank()
+                || (l.strategy() == LocatorStrategy.ROLE_NAME && !AriaRoles.isValid(l.role()))) {
+            return l.strategy() + ":" + l.value();
+        }
         try {
             return LocatorRenderer.render(l);
         } catch (Exception e) {

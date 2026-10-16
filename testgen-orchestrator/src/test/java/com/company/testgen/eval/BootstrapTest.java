@@ -117,4 +117,50 @@ class BootstrapTest {
         assertThat(ci.lower()).isEqualTo(0.0);
         assertThat(ci.upper()).isEqualTo(0.0);
     }
+
+    @Test
+    @DisplayName("Bootstrap handles single-case corpus (n=1) gracefully without NaN or division by zero (Assumption A-04)")
+    void testSingleCaseCorpus() {
+        Map<String, Double> candidate = Map.of("dashboard-date-filter-001", 1.0);
+        Map<String, Double> baseline = Map.of("dashboard-date-filter-001", 0.8);
+
+        Interval ci = Bootstrap.differenceCi(candidate, baseline, 10_000, 0.95);
+
+        assertThat(ci.point()).isCloseTo(0.2, offset(0.0001));
+        assertThat(ci.lower()).isCloseTo(0.2, offset(0.0001));
+        assertThat(ci.upper()).isCloseTo(0.2, offset(0.0001));
+        assertThat(ci.underpowered()).isTrue();
+    }
+
+    @Test
+    @DisplayName("Bootstrap handles single-case identical performance (n=1, diff=0)")
+    void testSingleCaseIdentical() {
+        Map<String, Double> candidate = Map.of("dashboard-date-filter-001", 1.0);
+        Map<String, Double> baseline = Map.of("dashboard-date-filter-001", 1.0);
+
+        Interval ci = Bootstrap.differenceCi(candidate, baseline, 10_000, 0.95);
+
+        assertThat(ci.point()).isEqualTo(0.0);
+        assertThat(ci.lower()).isEqualTo(0.0);
+        assertThat(ci.upper()).isEqualTo(0.0);
+        assertThat(ci.underpowered()).isTrue();
+    }
+
+    @Test
+    @DisplayName("Bootstrap handles zero-variance across multiple cases cleanly")
+    void testZeroVarianceMultipleCases() {
+        Map<String, Double> candidate = new LinkedHashMap<>();
+        Map<String, Double> baseline = new LinkedHashMap<>();
+        for (int i = 0; i < 5; i++) {
+            candidate.put("c" + i, 0.9);
+            baseline.put("c" + i, 0.8);
+        }
+
+        Interval ci = Bootstrap.differenceCi(candidate, baseline, 10_000, 0.95);
+
+        assertThat(ci.point()).isCloseTo(0.1, offset(0.0001));
+        assertThat(ci.lower()).isCloseTo(0.1, offset(0.0001));
+        assertThat(ci.upper()).isCloseTo(0.1, offset(0.0001));
+        assertThat(ci.underpowered()).isTrue(); // 5 < 10
+    }
 }

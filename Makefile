@@ -34,12 +34,15 @@ eval-smoke: package
 		--report=eval-report.json
 
 run-local: package
-	java -jar testgen-orchestrator/target/testgen-orchestrator.jar run \
-		--recording-dir=evals/cases/dashboard-date-filter-001 \
-		--target-area=dashboard \
-		--description="Dashboard date filter persists across reload" \
+	java -jar testgen-cli/target/testgen-cli.jar push fixtures/sample-recording \
+		--area=dashboard \
+		--desc="Dashboard view and export test" \
+		--local
+	java -jar testgen-orchestrator/target/testgen-orchestrator.jar run fixtures/sample-recording \
+		--area=dashboard \
+		--desc="Dashboard view and export test" \
 		--requester=local-dev \
-		--idempotency-key=local-dev-001
+		--local
 
 clean:
 	./mvnw clean

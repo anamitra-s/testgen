@@ -60,4 +60,16 @@ class LocatorRendererTest {
         assertThatThrownBy(() -> LocatorRenderer.render(nullStrategy))
                 .isInstanceOf(NullPointerException.class);
     }
+
+    @Test
+    @DisplayName("LocatorRenderer handles null value safely without throwing raw NPE")
+    void testRenderNullValueSafely() {
+        ResolvedLocator nullValueTestId = new ResolvedLocator("e1", LocatorStrategy.TEST_ID, null);
+        assertThat(LocatorRenderer.render(nullValueTestId))
+                .isEqualTo("page.getByTestId(\"\")");
+
+        ResolvedLocator nullValueRole = new ResolvedLocator("e2", LocatorStrategy.ROLE_NAME, null, "button");
+        assertThat(LocatorRenderer.render(nullValueRole))
+                .contains("setName(\"\")");
+    }
 }

@@ -2,6 +2,7 @@ package com.company.testgen.eval;
 
 import com.company.testgen.model.ExistingCodeContext;
 import com.company.testgen.model.ResolvedLocator;
+import com.company.testgen.model.ResolvedLocatorSet;
 import com.company.testgen.model.contract.RecordedElements;
 import com.company.testgen.util.Json;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -131,6 +132,7 @@ public class Corpus {
         List<String> tags = List.of();
         String knownLimitations = "";
         String status = EvalCase.STATUS_ACTIVE;
+        boolean expectedToEscalate = false;
 
         if (Files.exists(metaPath)) {
             JsonNode meta = YAML_MAPPER.readTree(metaPath.toFile());
@@ -150,7 +152,8 @@ public class Corpus {
                 tags = tagList;
             }
             if (meta.has("knownLimitations")) knownLimitations = meta.get("knownLimitations").asText();
-            if (meta.has("status")) status = meta.get("status").asText();
+            if (meta.has("status")) status = meta.get("status").asText().trim();
+            if (meta.has("expectedToEscalate")) expectedToEscalate = meta.get("expectedToEscalate").asBoolean(false);
         }
 
         // 2. Recorded test JS
@@ -164,7 +167,7 @@ public class Corpus {
             elements = Json.parse(Files.readString(elementsPath, StandardCharsets.UTF_8), RecordedElements.class);
         }
 
-        // 4. Expected locators JSON
+        // 4. Expected locators JSON (supports Map<String, ResolvedLocator>, ResolvedLocatorSet {"locators":[...]}, or List<ResolvedLocator>)
         Map<String, ResolvedLocator> expectedLocators = new LinkedHashMap<>();
         if (Files.exists(locatorsPath)) {
             String locJson = Files.readString(locatorsPath, StandardCharsets.UTF_8);
@@ -177,8 +180,17 @@ public class Corpus {
                     }
                 }
             } else if (node.isObject()) {
-                Map<String, ResolvedLocator> map = Json.mapper().readValue(locJson, new TypeReference<Map<String, ResolvedLocator>>() {});
-                expectedLocators.putAll(map);
+                if (node.has("locators") && node.get("locators").isArray()) {
+                    ResolvedLocatorSet set = Json.parse(locJson, ResolvedLocatorSet.class);
+                    for (ResolvedLocator rl : set.locators()) {
+                        if (rl.elementRefId() != null) {
+                            expectedLocators.put(rl.elementRefId(), rl);
+                        }
+                    }
+                } else {
+                    Map<String, ResolvedLocator> map = Json.mapper().readValue(locJson, new TypeReference<Map<String, ResolvedLocator>>() {});
+                    expectedLocators.putAll(map);
+                }
             }
         }
 
@@ -190,8 +202,8 @@ public class Corpus {
 
         return new EvalCase(
                 caseId, targetArea, description, sourcedFrom, capturedAt,
-                difficulty, tags, knownLimitations, status, recordedTestJs,
-                elements, expectedLocators, context, caseDir
+                difficulty, tags, knownLimitations, status, expectedToEscalate,
+                recordedTestJs, elements, expectedLocators, context, caseDir
         );
     }
 
@@ -228,11 +240,19 @@ public class Corpus {
     }
 
     public List<EvalCase> load(SuiteSpec suite) {
-        return suite.filterCases(cases);
+        if (suite == null) {
+            return activeCases();
+        }
+        List<EvalCase> active = activeCases();
+        return suite.filterCases(active);
     }
 
     public List<EvalCase> cases() {
         return Collections.unmodifiableList(cases);
+    }
+
+    public List<EvalCase> activeCases() {
+        return cases.stream().filter(EvalCase::isActive).toList();
     }
 
     public Map<String, SuiteSpec> suites() {

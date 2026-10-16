@@ -3,7 +3,7 @@ package com.company.testgen.eval;
 import com.company.testgen.model.ExistingCodeContext;
 import com.company.testgen.model.ParsedTestPlan;
 import com.company.testgen.model.TestGenerationJob;
-import com.company.testgen.phase.ContextAssemblyPhase;
+import com.company.testgen.phases.ContextAssemblyPhase;
 
 import java.util.List;
 

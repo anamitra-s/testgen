@@ -11,45 +11,70 @@ pipeline {
     string(name: 'TEST_DESCRIPTION',       description: 'What the test verifies')
     string(name: 'REQUESTER_GITLAB_USER',  description: 'GitLab username to assign the MR to')
     string(name: 'IDEMPOTENCY_KEY',        description: 'Computed by the CLI — do not edit')
+    string(name: 'TESTGEN_LLM_PROVIDER',   defaultValue: 'anthropic', description: 'anthropic | gemini | mock')
   }
   stages {
     stage('Checkout') {
       steps {
         git branch: 'main', url: env.ORCHESTRATOR_REPO_URL ?: 'https://gitlab.example.com/qa/testgen-orchestrator.git'
-        sh "git clone --depth 1 --branch ${params.RECORDING_BRANCH} ${env.TEST_REPO_URL} recording"
+        withEnv([
+          "PARAM_RECORDING_BRANCH=${params.RECORDING_BRANCH}",
+          "PARAM_TEST_REPO_URL=${env.TEST_REPO_URL}"
+        ]) {
+          sh '''
+            git clone --depth 1 --branch "$PARAM_RECORDING_BRANCH" "$PARAM_TEST_REPO_URL" recording
+            git clone --depth 1 --branch main "$PARAM_TEST_REPO_URL" test-workspace
+          '''
+        }
       }
     }
     stage('Run pipeline') {
       steps {
         withCredentials([
           string(credentialsId: 'anthropic-api-key', variable: 'ANTHROPIC_API_KEY'),
+          string(credentialsId: 'gemini-api-key',    variable: 'GEMINI_API_KEY'),
           string(credentialsId: 'gitlab-bot-token',  variable: 'GITLAB_TOKEN'),
+          string(credentialsId: 'testgen-db-url',    variable: 'TESTGEN_DB_URL'),
           usernamePassword(credentialsId: 'testgen-db', usernameVariable: 'TESTGEN_DB_USER',
                                                         passwordVariable: 'TESTGEN_DB_PASSWORD')
         ]) {
-          script {
-            def rc = sh(returnStatus: true, script: """
-              java -jar target/testgen-orchestrator.jar run \\
-                --recording-dir=recording \\
-                --recording-branch=${params.RECORDING_BRANCH} \\
-                --target-area=${params.TARGET_AREA} \\
-                --description='${params.TEST_DESCRIPTION}' \\
-                --requester=${params.REQUESTER_GITLAB_USER} \\
-                --idempotency-key=${params.IDEMPOTENCY_KEY}
-            """)
-            // Read MR URL from job-summary.json before any cleanup
-            if (fileExists('job-summary.json')) {
-              try {
-                def summary = readJSON file: 'job-summary.json'
-                env.TESTGEN_MR_URL = summary.mrUrl ?: 'N/A'
-              } catch (Exception e) {
-                echo "Failed to parse job-summary.json: ${e.message}"
+          withEnv([
+            "PARAM_RECORDING_BRANCH=${params.RECORDING_BRANCH}",
+            "PARAM_TARGET_AREA=${params.TARGET_AREA}",
+            "PARAM_TEST_DESCRIPTION=${params.TEST_DESCRIPTION}",
+            "PARAM_REQUESTER=${params.REQUESTER_GITLAB_USER}",
+            "PARAM_IDEMPOTENCY_KEY=${params.IDEMPOTENCY_KEY}",
+            "PARAM_PROVIDER=${params.TESTGEN_LLM_PROVIDER ?: 'anthropic'}"
+          ]) {
+            script {
+              def rc = sh(returnStatus: true, script: '''
+                export TESTGEN_LLM_PROVIDER="$PARAM_PROVIDER"
+                export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}"
+                export GEMINI_API_KEY="${GEMINI_API_KEY:-}"
+                java -jar target/testgen-orchestrator.jar run \
+                  --recording-dir=recording \
+                  --workspace=test-workspace \
+                  --recording-branch="$PARAM_RECORDING_BRANCH" \
+                  --target-area="$PARAM_TARGET_AREA" \
+                  --description="$PARAM_TEST_DESCRIPTION" \
+                  --requester="$PARAM_REQUESTER" \
+                  --idempotency-key="$PARAM_IDEMPOTENCY_KEY" \
+                  --provider="$PARAM_PROVIDER"
+              ''')
+              // Read MR URL from job-summary.json before any cleanup
+              if (fileExists('job-summary.json')) {
+                try {
+                  def summary = readJSON file: 'job-summary.json'
+                  env.TESTGEN_MR_URL = summary.mrUrl ?: 'N/A'
+                } catch (Exception e) {
+                  echo "Failed to parse job-summary.json: ${e.message}"
+                }
               }
+              // Exit-code contract (§9.2)
+              if (rc in [10, 50])       currentBuild.result = 'UNSTABLE'
+              else if (rc in [0,20,41]) currentBuild.result = 'SUCCESS'
+              else                      error("testgen exited ${rc}")
             }
-            // Exit-code contract (§9.2)
-            if (rc in [10, 50])       currentBuild.result = 'UNSTABLE'
-            else if (rc in [0,20,41]) currentBuild.result = 'SUCCESS'
-            else                      error("testgen exited ${rc}")
           }
         }
       }

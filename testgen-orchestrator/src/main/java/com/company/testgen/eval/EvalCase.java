@@ -25,6 +25,7 @@ public record EvalCase(
         List<String> tags,
         String knownLimitations,
         String status,
+        boolean expectedToEscalate,
         String recordedTestJs,
         RecordedElements recordedElements,
         Map<String, ResolvedLocator> expectedLocators,
@@ -48,6 +49,30 @@ public record EvalCase(
         existingCodeContext = existingCodeContext != null ? existingCodeContext : ExistingCodeContext.empty();
     }
 
+    public EvalCase(
+            String caseId,
+            String targetArea,
+            String description,
+            String sourcedFrom,
+            Instant capturedAt,
+            String difficulty,
+            List<String> tags,
+            String knownLimitations,
+            String status,
+            String recordedTestJs,
+            RecordedElements recordedElements,
+            Map<String, ResolvedLocator> expectedLocators,
+            ExistingCodeContext existingCodeContext,
+            Path caseDir
+    ) {
+        this(
+                caseId, targetArea, description, sourcedFrom, capturedAt,
+                difficulty, tags, knownLimitations, status, false,
+                recordedTestJs, recordedElements, expectedLocators,
+                existingCodeContext, caseDir
+        );
+    }
+
     public boolean isActive() {
         return STATUS_ACTIVE.equalsIgnoreCase(status);
     }
@@ -63,8 +88,9 @@ public record EvalCase(
     public EvalCase withStatus(String newStatus) {
         return new EvalCase(
                 caseId, targetArea, description, sourcedFrom, capturedAt,
-                difficulty, tags, knownLimitations, newStatus, recordedTestJs,
-                recordedElements, expectedLocators, existingCodeContext, caseDir
+                difficulty, tags, knownLimitations, newStatus, expectedToEscalate,
+                recordedTestJs, recordedElements, expectedLocators,
+                existingCodeContext, caseDir
         );
     }
 }

@@ -13,13 +13,16 @@ import com.company.testgen.persistence.EffectStatus;
 import com.company.testgen.persistence.InMemoryEffectRepository;
 import org.gitlab4j.api.CommitsApi;
 import org.gitlab4j.api.GitLabApi;
+import org.gitlab4j.api.GitLabApiException;
 import org.gitlab4j.api.MergeRequestApi;
 import org.gitlab4j.api.RepositoryApi;
+import org.gitlab4j.api.UserApi;
 import org.gitlab4j.api.models.Branch;
 import org.gitlab4j.api.models.Commit;
 import org.gitlab4j.api.models.CommitPayload;
 import org.gitlab4j.api.models.MergeRequest;
 import org.gitlab4j.api.models.MergeRequestParams;
+import org.gitlab4j.api.models.User;
 import org.gitlab4j.models.Constants;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -44,6 +47,7 @@ class GitLabIntegrationServiceTest {
     private RepositoryApi repositoryApi;
     private CommitsApi commitsApi;
     private MergeRequestApi mergeRequestApi;
+    private UserApi userApi;
     private InMemoryEffectRepository effectRepo;
     private EffectExecutor effectExecutor;
     private GitLabIntegrationService service;
@@ -56,10 +60,12 @@ class GitLabIntegrationServiceTest {
         repositoryApi = mock(RepositoryApi.class);
         commitsApi = mock(CommitsApi.class);
         mergeRequestApi = mock(MergeRequestApi.class);
+        userApi = mock(UserApi.class);
 
         when(gitLabApi.getRepositoryApi()).thenReturn(repositoryApi);
         when(gitLabApi.getCommitsApi()).thenReturn(commitsApi);
         when(gitLabApi.getMergeRequestApi()).thenReturn(mergeRequestApi);
+        when(gitLabApi.getUserApi()).thenReturn(userApi);
 
         effectRepo = new InMemoryEffectRepository();
         effectExecutor = new EffectExecutor(effectRepo);
@@ -175,6 +181,79 @@ class GitLabIntegrationServiceTest {
 
         assertThat(title).contains("[Draft][NEEDS REVIEW]");
         assertThat(desc).contains("NEEDS HUMAN REVIEW");
+    }
+
+    @Test
+    @DisplayName("GitLab assignee resolution: resolves username to user ID via UserApi")
+    void testAssigneeResolutionWithUsername() throws Exception {
+        UUID jobId = UUID.randomUUID();
+        TestGenerationJob job = new TestGenerationJob(
+                jobId, "v2:assignee-user", "dashboard", "Dashboard test",
+                "jane.doe", "scratch", "bundle-1", "claude-sonnet-5",
+                "1.0.0", "2.0.0", "sha-base", "worker-1", 1L, Path.of(".")
+        );
+
+        User resolvedUser = new User();
+        resolvedUser.setId(789L);
+        when(userApi.getOptionalUser("jane.doe")).thenReturn(Optional.of(resolvedUser));
+
+        String branch = BranchNamer.forJob(job);
+        Branch createdBranch = new Branch();
+        createdBranch.setName(branch);
+        when(repositoryApi.createBranch(projectId, branch, "main")).thenReturn(createdBranch);
+
+        Commit createdCommit = new Commit();
+        createdCommit.setId("c0ffee789");
+        when(commitsApi.createCommit(any(), any(CommitPayload.class))).thenReturn(createdCommit);
+
+        MergeRequest createdMr = new MergeRequest();
+        createdMr.setIid(105L);
+        createdMr.setWebUrl("https://gitlab.example.com/mr/105");
+        when(mergeRequestApi.createMergeRequest(any(), any(MergeRequestParams.class))).thenReturn(createdMr);
+
+        service.publish(job, List.of(new GeneratedFile("src/test/java/Test.java", "code", true)), ConfidenceTier.VERIFIED, VerificationResult.passed(1000));
+
+        ArgumentCaptor<MergeRequestParams> captor = ArgumentCaptor.forClass(MergeRequestParams.class);
+        verify(mergeRequestApi).createMergeRequest(any(), captor.capture());
+        MergeRequestParams captured = captor.getValue();
+        assertThat(captured.getForm(true).getFormValues().get("assignee_id").getValue().toString()).isEqualTo("789");
+    }
+
+    @Test
+    @DisplayName("GitLab assignee resolution: fail-open fallback leaves MR unassigned when user not found or lookup fails")
+    void testAssigneeResolutionFailOpenFallback() throws Exception {
+        UUID jobId = UUID.randomUUID();
+        TestGenerationJob job = new TestGenerationJob(
+                jobId, "v2:assignee-failopen", "dashboard", "Dashboard test",
+                "nonexistent.user", "scratch", "bundle-1", "claude-sonnet-5",
+                "1.0.0", "2.0.0", "sha-base", "worker-1", 1L, Path.of(".")
+        );
+
+        when(userApi.getOptionalUser("nonexistent.user")).thenReturn(Optional.empty());
+
+        String branch = BranchNamer.forJob(job);
+        Branch createdBranch = new Branch();
+        createdBranch.setName(branch);
+        when(repositoryApi.createBranch(projectId, branch, "main")).thenReturn(createdBranch);
+
+        Commit createdCommit = new Commit();
+        createdCommit.setId("c0ffee999");
+        when(commitsApi.createCommit(any(), any(CommitPayload.class))).thenReturn(createdCommit);
+
+        MergeRequest createdMr = new MergeRequest();
+        createdMr.setIid(106L);
+        createdMr.setWebUrl("https://gitlab.example.com/mr/106");
+        when(mergeRequestApi.createMergeRequest(any(), any(MergeRequestParams.class))).thenReturn(createdMr);
+
+        // Should not throw, MR still created unassigned
+        MergeRequestResult result = service.publish(job, List.of(new GeneratedFile("src/test/java/Test.java", "code", true)), ConfidenceTier.VERIFIED, VerificationResult.passed(1000));
+        assertThat(result.iid()).isEqualTo(106);
+
+        ArgumentCaptor<MergeRequestParams> captor = ArgumentCaptor.forClass(MergeRequestParams.class);
+        verify(mergeRequestApi).createMergeRequest(any(), captor.capture());
+        MergeRequestParams captured = captor.getValue();
+        var assigneeVal = captured.getForm(true).getFormValues().get("assignee_id");
+        assertThat(assigneeVal == null || assigneeVal.getValue() == null).isTrue();
     }
 
     @Test
