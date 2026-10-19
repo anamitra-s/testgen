@@ -324,6 +324,7 @@
                     <version>${maven-surefire-plugin.version}</version>
                     <configuration>
                         <argLine>-Dnet.bytebuddy.experimental=true</argLine>
+                        <failIfNoSpecifiedTests>false</failIfNoSpecifiedTests>
                         <excludedGroups>live-contract</excludedGroups>
                         <includes>
                             <include>**/*Test.java</include>

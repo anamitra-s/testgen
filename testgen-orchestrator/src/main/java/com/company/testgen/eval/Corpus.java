@@ -244,7 +244,18 @@ public class Corpus {
             return activeCases();
         }
         List<EvalCase> active = activeCases();
-        return suite.filterCases(active);
+        List<EvalCase> filtered = suite.filterCases(active);
+        if (suite.cases() != null && !"all".equalsIgnoreCase(suite.cases())) {
+            try {
+                int target = Integer.parseInt(suite.cases().trim());
+                int clamped = Math.min(target, active.size());
+                if (filtered.size() > clamped) {
+                    return filtered.subList(0, clamped);
+                }
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return filtered;
     }
 
     public List<EvalCase> cases() {

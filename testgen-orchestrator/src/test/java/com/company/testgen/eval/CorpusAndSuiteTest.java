@@ -100,6 +100,65 @@ class CorpusAndSuiteTest {
     }
 
     @Test
+    @DisplayName("smoke performs stratified sampling across strata when 10+ cases exist using @TempDir")
+    void testStratifiedSamplingWithTenPlusCasesUsingTempDir(@TempDir Path tempDir) throws IOException {
+        Path casesDir = tempDir.resolve("cases");
+        Files.createDirectories(casesDir);
+        Files.writeString(tempDir.resolve("suites.yaml"), "suites:\n  smoke:\n    cases: 10\n    selection: stratified\n");
+
+        // Create 9 active cases across multiple targetAreas and difficulties (3 areas x 3 difficulties)
+        String[] areas = {"dashboard", "composer", "billing"};
+        String[] difficulties = {"easy", "medium", "hard"};
+        int id = 1;
+        for (String area : areas) {
+            for (String diff : difficulties) {
+                Path dir = casesDir.resolve("case-" + id++);
+                Files.createDirectories(dir);
+                Files.writeString(dir.resolve("meta.yaml"),
+                        String.format("caseId: %s\ntargetArea: %s\ndifficulty: %s\nstatus: active\n",
+                                dir.getFileName(), area, diff));
+            }
+        }
+
+        // Add 1 quarantined case and 1 retired case to verify exclusion
+        Path qDir = casesDir.resolve("case-quarantined");
+        Files.createDirectories(qDir);
+        Files.writeString(qDir.resolve("meta.yaml"), "caseId: case-quarantined\ntargetArea: dashboard\ndifficulty: easy\nstatus: quarantined\n");
+
+        Path rDir = casesDir.resolve("case-retired");
+        Files.createDirectories(rDir);
+        Files.writeString(rDir.resolve("meta.yaml"), "caseId: case-retired\ntargetArea: composer\ndifficulty: medium\nstatus: retired\n");
+
+        Corpus corpus = Corpus.load(tempDir);
+        assertThat(corpus.activeCases()).hasSize(9); // 3x3 active cases
+
+        SuiteSpec smoke = corpus.suite("smoke");
+        List<EvalCase> selected = corpus.load(smoke);
+
+        // Clamped to active count (Math.min(10, 9) = 9)
+        assertThat(selected).hasSize(9);
+        assertThat(selected).allMatch(EvalCase::isActive);
+        assertThat(selected).noneMatch(c -> c.caseId().equals("case-quarantined") || c.caseId().equals("case-retired"));
+
+        // Now add more cases so active count exceeds 10 (15 active cases total)
+        for (int i = 10; i <= 15; i++) {
+            Path dir = casesDir.resolve("extra-case-" + i);
+            Files.createDirectories(dir);
+            Files.writeString(dir.resolve("meta.yaml"),
+                    String.format("caseId: %s\ntargetArea: dashboard\ndifficulty: easy\nstatus: active\n",
+                            dir.getFileName()));
+        }
+
+        Corpus largerCorpus = Corpus.load(tempDir);
+        assertThat(largerCorpus.activeCases()).hasSize(15);
+
+        List<EvalCase> smoke10 = largerCorpus.load(smoke);
+        assertThat(smoke10).hasSize(10);
+        assertThat(smoke10).allMatch(EvalCase::isActive);
+        assertThat(smoke10).noneMatch(c -> c.caseId().equals("case-quarantined") || c.caseId().equals("case-retired"));
+    }
+
+    @Test
     @DisplayName("SuiteSpec filters and stratifies cases")
     void testSuiteSpecFiltering() {
         EvalCase easy1 = new EvalCase("c1", "dashboard", "", "", null, "easy", List.of(), "", "active", "", null, null, null, null);

@@ -71,6 +71,36 @@ class EvalRunnerTest {
     }
 
     @Test
+    @DisplayName("EvalRunner runs smoke suite gracefully on single-case corpus clamping cases without error (Assumption A-04)")
+    void testSmokeSuiteExecutionOnSingleCaseCorpus() {
+        EvalRepository repo = new InMemoryEvalRepository();
+        Corpus corpus = Corpus.load(Path.of("evals"));
+        SuiteSpec smoke = corpus.suite("smoke"); // specifies cases: 10 in suites.yaml
+
+        LlmClient mockLlm = mock(LlmClient.class);
+        when(mockLlm.resolveLocators(any(ResolveRequest.class))).thenAnswer(invocation ->
+                new ResolvedLocatorSet(List.of(
+                        new ResolvedLocator("date-filter-btn", LocatorStrategy.TEST_ID, "date-filter-button"),
+                        new ResolvedLocator("start-date-input", LocatorStrategy.LABEL, "Start Date"),
+                        new ResolvedLocator("end-date-input", LocatorStrategy.LABEL, "End Date"),
+                        new ResolvedLocator("apply-filter-btn", LocatorStrategy.ROLE_NAME, "Apply Filter", "button"),
+                        new ResolvedLocator("filter-badge", LocatorStrategy.TEST_ID, "active-date-badge")
+                ))
+        );
+
+        EvalRunner runner = new EvalRunner(repo, corpus, mockLlm);
+        RunConfig config = new RunConfig(
+                2, 2, "advisory", "MANUAL", "claude-sonnet-5", "test-prompt-hash",
+                "1.0.0", "main", Path.of("evals"), Path.of("eval-report.json")
+        );
+
+        EvalRun run = runner.run(smoke, config);
+        assertThat(run).isNotNull();
+        assertThat(run.caseCount()).isEqualTo(corpus.activeCases().size());
+        assertThat(run.metrics().firstAttemptPassRate()).isEqualTo(1.0);
+    }
+
+    @Test
     @DisplayName("Deliberately degraded locator set triggers GateOutcome.FAIL in EvalGate (AC-04)")
     void testDegradedLocatorSetTriggersGateOutcomeFail() {
         EvalRepository repo = new InMemoryEvalRepository();

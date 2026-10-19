@@ -6,7 +6,6 @@ import com.company.testgen.model.GeneratedFileSet;
 import com.company.testgen.model.LocatorStrategy;
 import com.company.testgen.model.PageSnapshot;
 import com.company.testgen.model.ParsedTestPlan;
-import com.company.testgen.model.RecordedAction;
 import com.company.testgen.model.ResolvedLocator;
 import com.company.testgen.model.ResolvedLocatorSet;
 import com.company.testgen.util.Json;
@@ -137,29 +136,6 @@ public class LocalMockLlmClient implements LlmClient {
             }
         }
 
-        // If plan had actions but no snapshot elements were resolved
-        if (locators.isEmpty() && plan != null && plan.actions() != null) {
-            for (RecordedAction act : plan.actions()) {
-                if (act.elementRefId() != null && !act.elementRefId().isBlank() && !seenRefs.contains(act.elementRefId())) {
-                    seenRefs.add(act.elementRefId());
-                    String value = failFirst && req.attempt() == 0 && locators.isEmpty()
-                            ? "mock-non-unique-locator-attempt-0"
-                            : act.elementRefId();
-                    ResolvedLocator loc = new ResolvedLocator(act.elementRefId(), LocatorStrategy.TEST_ID, value, null);
-                    locators.add(new ResolvedLocator(act.elementRefId(), LocatorStrategy.TEST_ID, value, null, LocatorRenderer.render(loc)));
-                }
-            }
-        }
-
-        // Default fallback if nothing was extracted
-        if (locators.isEmpty()) {
-            String value = failFirst && req.attempt() == 0
-                    ? "mock-non-unique-locator-attempt-0"
-                    : "sample-submit-btn";
-            ResolvedLocator loc = new ResolvedLocator("e1", LocatorStrategy.TEST_ID, value, null);
-            locators.add(new ResolvedLocator("e1", LocatorStrategy.TEST_ID, value, null, LocatorRenderer.render(loc)));
-        }
-
         return ResolvedLocatorSet.of(locators);
     }
 
@@ -167,12 +143,15 @@ public class LocalMockLlmClient implements LlmClient {
     public GeneratedFileSet generateCode(GenerateRequest req) {
         Objects.requireNonNull(req, "request must not be null");
 
-        String targetArea = (req.plan() != null && req.plan().targetArea() != null && !req.plan().targetArea().isBlank())
-                ? req.plan().targetArea()
-                : "dashboard";
+        if (req.plan() == null || req.plan().targetArea() == null || req.plan().targetArea().isBlank()
+                || req.locators() == null || req.locators().locators().isEmpty()) {
+            return new GeneratedFileSet(List.of());
+        }
+
+        String targetArea = req.plan().targetArea();
         String cleanArea = targetArea.trim().toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]", "");
         if (cleanArea.isEmpty()) {
-            cleanArea = "dashboard";
+            cleanArea = "tests";
         }
         String capArea = Character.toUpperCase(cleanArea.charAt(0)) + cleanArea.substring(1);
 
